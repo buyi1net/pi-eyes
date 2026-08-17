@@ -1,0 +1,2 @@
+# PS1 保持原字节(BOM + 换行),禁止 eol 归一化破坏 PowerShell 5.1 解析
+*.ps1 -text

@@ -1,0 +1,24 @@
+{
+  "name": "pi-eyes",
+  "version": "0.1.0",
+  "description": "Give text-only models in pi the ability to see images (12 vision tools ported from dsh-vision-router ideas)",
+  "type": "module",
+  "pi": {
+    "extensions": [
+      "./index.ts"
+    ]
+  },
+  "dependencies": {
+    "potrace": "^2.1.8",
+    "puppeteer-core": "^25.7.0"
+  },
+  "keywords": [
+    "pi-package",
+    "pi-extension",
+    "vision",
+    "images"
+  ],
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*"
+  }
+}
