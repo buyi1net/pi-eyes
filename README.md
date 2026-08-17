@@ -4,10 +4,23 @@
 
 DeepSeek、GLM 等纯文本模型装上本扩展后,可以在对话里直接看图、定位元素、量像素差异、读长截图、矢量化图标。
 
-## 安装
+## 使用方法
 
 ```bash
+# 安装
 pi install git:github.com/buyi1net/pi-eyes
+
+# 验证
+pi list
+
+# 启用或禁用包内资源
+pi config
+
+# 更新
+pi update git:github.com/buyi1net/pi-eyes
+
+# 卸载
+pi remove git:github.com/buyi1net/pi-eyes
 ```
 
 安装后重启 pi(或 `/reload`)即可,无需其它配置。建议为会话选一个文本模型(如 `deepseek/deepseek-v4-flash`、`zai-coding-cn/glm-5.2`),模型会自主调用下列工具看图。
@@ -30,6 +43,8 @@ pi install git:github.com/buyi1net/pi-eyes
 | vision_html_screenshot | 本地 HTML 无头 Chrome 截图(viewport / fullPage) |
 
 招牌流程:参考图 → 实现 HTML → `vision_html_screenshot` 截图 → `vision_pixel_diff` 度量 → 修复 → 迭代到差异收敛。
+
+**模型能力自适应**:原生多模态模型(如 gpt-5.5、glm-4.6v)用自己的视觉直接看图,`vision_describe` 对它们自动禁用(避免冗余后端调用);像素级度量工具(ground/detect/crop/pixel_diff/ocr/trace 等)对任何模型保留——它们是原生视觉做不了的精确操作。纯文本模型的全部工具可用。
 
 ## 视觉后端与隐私
 

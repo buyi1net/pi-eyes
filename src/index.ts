@@ -41,13 +41,41 @@ interface PastedImage {
 export default function (pi: ExtensionAPI) {
   const chain = new VisionChain();
 
+  // 多模态模型用自己的原生视觉工作(用户拍板):vision_describe 只是"看图回答",
+  // 多模态模型原生就能做,禁用避免冗余后端调用;像素级工具(ground/detect/
+  // crop/diff/ocr/trace/…)是原生视觉做不了的度量操作,对任何模型一律保留。
+  // 回加只针对自己移除的:用户经 pi config 手动禁用的不碰。
+  let describeRemovedByUs = false;
+  const applyDescribeGating = (model: { input?: readonly string[] } | undefined) => {
+    const multimodal = model?.input?.includes("image") === true;
+    const active = pi.getActiveTools();
+    if (multimodal) {
+      const next = active.filter((name) => name !== "vision_describe");
+      if (next.length !== active.length) {
+        pi.setActiveTools(next);
+        describeRemovedByUs = true;
+      }
+    } else if (describeRemovedByUs && !active.includes("vision_describe")) {
+      pi.setActiveTools([...new Set([...active, "vision_describe"])]);
+      describeRemovedByUs = false;
+    }
+  };
+  // 启动/换模型都重算:会话启动时模型已定,session_start 覆盖;会话内 /model
+  // 切换由 model_select 覆盖(纯文本 ↔ 多模态互切即时生效)
+  pi.on("session_start", async (_event, ctx) => {
+    applyDescribeGating(ctx.model as { input?: readonly string[] } | undefined);
+  });
+  pi.on("model_select", async (event) => {
+    applyDescribeGating(event.model as { input?: readonly string[] });
+  });
+
   pi.on("agent_start", async () => {
     chain.beginTurn();
   });
 
-  // 用户在会话里贴的图落地成文件并告知路径:纯文本模型拿不到图片内容,
-  // 但拿到路径后就能用 vision_* 工具查看 —— 这是"贴图 -> 工具看图"的桥。
-  pi.on("before_agent_start", async (event) => {
+  // 用户在会话里贴的图落地成文件并告知路径。
+  // 按模型能力分支(多模态:图直接进上下文,工具非必需;纯文本:工具是唯一看图途径)
+  pi.on("before_agent_start", async (event, ctx) => {
     const images = (event as { images?: PastedImage[] }).images ?? [];
     const saved: string[] = [];
     for (let i = 0; i < images.length; i++) {
@@ -61,13 +89,18 @@ export default function (pi: ExtensionAPI) {
       saved.push(target);
     }
     if (saved.length === 0) return undefined;
+    const multimodal = ctx.model?.input?.includes("image") === true;
+    const content = multimodal
+      ? `The user attached ${saved.length} image(s), also saved to disk (you can see them directly). ` +
+        `For pixel-precise work (bounding boxes, diff metrics, cropping) the vision_* tools are available; ` +
+        `a plain description question needs no tool:\n${saved.join("\n")}`
+      : `The user attached ${saved.length} image(s) in this message. A text-only model cannot see them directly; ` +
+        `they were saved to disk. Use the vision_* tools (vision_describe / vision_ground / vision_ocr ...) ` +
+        `with these paths to look at them:\n${saved.join("\n")}`;
     return {
       message: {
-        customType: "pi-vision-tools",
-        content:
-          `The user attached ${saved.length} image(s) in this message. A text-only model cannot see them directly; ` +
-          `they were saved to disk. Use the vision_* tools (vision_describe / vision_ground / vision_ocr ...) ` +
-          `with these paths to look at them:\n${saved.join("\n")}`,
+        customType: "pi-eyes",
+        content,
         display: true,
       },
     };
