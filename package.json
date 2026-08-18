@@ -1,6 +1,6 @@
 {
   "name": "pi-eyes",
-  "version": "0.3.0",
+  "version": "0.3.1",
   "description": "Give text-only models in pi the ability to see images (12 vision tools ported from dsh-vision-router ideas)",
   "type": "module",
   "pi": {
@@ -9,6 +9,7 @@
     ]
   },
   "dependencies": {
+    "@earendil-works/pi-tui": "^0.84.2",
     "potrace": "^2.1.8",
     "puppeteer-core": "^25.7.0",
     "sharp": "^0.35.3"

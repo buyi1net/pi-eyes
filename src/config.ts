@@ -57,6 +57,7 @@ export interface LoadPiEyesConfigOptions extends PiEyesConfigPaths {
 }
 
 export interface LoadedPiEyesConfig {
+  globalConfig: ResolvedPiEyesConfig;
   config: ResolvedPiEyesConfig;
   globalLayer?: PiEyesConfigLayer;
   projectLayer?: PiEyesConfigLayer;
@@ -277,6 +278,7 @@ export async function loadPiEyesConfig(options: LoadPiEyesConfigOptions): Promis
       warnings.push(`${options.globalPath} 无效，已忽略：${error instanceof Error ? error.message : String(error)}`);
     }
   }
+  const globalConfig = cloneResolved(config);
 
   let projectLayer: PiEyesConfigLayer | undefined;
   if (options.projectTrusted) {
@@ -292,7 +294,7 @@ export async function loadPiEyesConfig(options: LoadPiEyesConfigOptions): Promis
     }
   }
 
-  return { config, globalLayer, projectLayer, warnings };
+  return { globalConfig, config, globalLayer, projectLayer, warnings };
 }
 
 function sensitiveKey(key: string): boolean {

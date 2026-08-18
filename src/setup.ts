@@ -3,13 +3,13 @@ import type {
   ExtensionAPI,
   ExtensionCommandContext,
 } from "@earendil-works/pi-coding-agent";
+import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import {
   getEyesSetupMessages,
   type EyesSetupLanguage,
   type EyesSetupMessages,
 } from "./i18n";
 
-export type SetupScope = "global" | "project";
 export type VisionRouteMode = "automatic" | "fixed" | "public-only";
 
 export interface VisionModelRef {
@@ -32,6 +32,15 @@ export interface EyesSetupConfig {
   };
 }
 
+export interface EyesSetupState {
+  config: EyesSetupConfig;
+  projectOverrideActive: boolean;
+}
+
+export interface EyesSetupSaveResult {
+  projectOverrideActive: boolean;
+}
+
 export type VisionModelStatus = "authenticated" | "no-auth-required";
 
 export interface VisionModelCandidate {
@@ -45,18 +54,21 @@ export interface ModelTestResult {
 }
 
 export interface EyesSetupDependencies {
-  loadConfig(ctx: ExtensionCommandContext): Promise<EyesSetupConfig | undefined>;
+  loadConfig(ctx: ExtensionCommandContext): Promise<EyesSetupState | undefined>;
   saveConfig(
-    scope: SetupScope,
     config: EyesSetupConfig,
     ctx: ExtensionCommandContext,
-  ): Promise<void>;
-  refreshModels?(ctx: ExtensionCommandContext): Promise<void>;
+  ): Promise<EyesSetupSaveResult>;
+  refreshModels?(ctx: ExtensionCommandContext, signal?: AbortSignal): Promise<void>;
   testModel?(
     model: Model<Api>,
     ctx: ExtensionCommandContext,
+    signal?: AbortSignal,
   ): Promise<ModelTestResult>;
 }
+
+type ModelPane = "selected" | "available";
+type BusyAction = "refresh" | "test" | "save";
 
 function modelKey(model: Pick<Model<Api>, "provider" | "id">): string {
   return `${model.provider}\0${model.id}`;
@@ -68,6 +80,10 @@ function refKey(model: VisionModelRef): string {
 
 function modelRef(model: Pick<Model<Api>, "provider" | "id">): VisionModelRef {
   return { provider: model.provider, model: model.id };
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
 }
 
 export function discoverVisionModels(ctx: ExtensionCommandContext): VisionModelCandidate[] {
@@ -84,550 +100,433 @@ export function discoverVisionModels(ctx: ExtensionCommandContext): VisionModelC
     });
 }
 
-function formatModelLabel(candidate: VisionModelCandidate, messages: EyesSetupMessages): string {
-  const status = candidate.status === "authenticated"
-    ? messages.modelStatusAuthenticated
-    : messages.modelStatusNoAuthRequired;
-  return `${candidate.model.provider}/${candidate.model.id} — ${status}`;
-}
-
-function isCandidateAvailable(candidate: VisionModelCandidate, ctx: ExtensionCommandContext): boolean {
-  return discoverVisionModels(ctx).some((item) => modelKey(item.model) === modelKey(candidate.model));
-}
-
-function unavailableAllowedModels(
-  allowedModels: VisionModelRef[] | null,
-  ctx: ExtensionCommandContext,
-): VisionModelRef[] {
-  if (allowedModels === null) return [];
-  const available = new Set(discoverVisionModels(ctx).map((candidate) => modelKey(candidate.model)));
-  return allowedModels.filter((model) => !available.has(refKey(model)));
-}
-
-function errorText(error: unknown): string {
-  return error instanceof Error ? error.message : String(error);
-}
-
-function isCancellation(error: unknown, ctx: ExtensionCommandContext): boolean {
-  return ctx.signal.aborted;
-}
-
-type StepChoice<T> =
-  | { kind: "value"; value: T }
-  | { kind: "back" }
-  | { kind: "exit" };
-
-async function chooseLanguage(
-  ctx: ExtensionCommandContext,
-  initial: EyesSetupLanguage,
-): Promise<EyesSetupLanguage | undefined> {
-  const messages = getEyesSetupMessages(initial);
-  const choice = await ctx.ui.select(messages.languageTitle, [
-    messages.languageChinese,
-    messages.languageEnglish,
-  ]);
-  if (choice === messages.languageChinese) return "zh-CN";
-  if (choice === messages.languageEnglish) return "en";
-  return undefined;
-}
-
-async function chooseScope(
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-): Promise<StepChoice<SetupScope>> {
-  const options = [messages.scopeGlobal];
-  if (ctx.isProjectTrusted()) options.push(messages.scopeProject);
-  const choice = await ctx.ui.select(messages.scopeTitle, [...options, messages.back]);
-  if (choice === undefined) return { kind: "exit" };
-  if (choice === messages.back) return { kind: "back" };
-  if (choice === messages.scopeGlobal) return { kind: "value", value: "global" };
-  if (choice === messages.scopeProject && ctx.isProjectTrusted()) {
-    return { kind: "value", value: "project" };
-  }
-  return { kind: "exit" };
+function sameKeys(a: VisionModelCandidate[], b: VisionModelCandidate[]): boolean {
+  return a.length === b.length && a.every((candidate, index) => (
+    modelKey(candidate.model) === modelKey(b[index].model)
+  ));
 }
 
 function routeLabel(mode: VisionRouteMode, messages: EyesSetupMessages): string {
-  if (mode === "automatic") return messages.strategyAutomatic;
-  if (mode === "fixed") return messages.strategyFixed;
-  return messages.strategyPublicOnly;
+  if (mode === "automatic") return messages.routeAutomatic;
+  if (mode === "fixed") return messages.routeFixed;
+  return messages.routePublicOnly;
 }
 
-async function chooseRoute(
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-  current: EyesSetupConfig | undefined,
-): Promise<StepChoice<VisionRouteMode>> {
-  const currentLabel = current
-    ? messages.currentConfiguration(routeLabel(current.backend.route.mode, messages))
-    : undefined;
-  const title = currentLabel ? `${messages.strategyTitle}\n${currentLabel}` : messages.strategyTitle;
-  const choice = await ctx.ui.select(title, [
-    messages.strategyAutomatic,
-    messages.strategyFixed,
-    messages.strategyPublicOnly,
-    messages.back,
-  ]);
-  if (choice === undefined) return { kind: "exit" };
-  if (choice === messages.back) return { kind: "back" };
-  if (choice === messages.strategyAutomatic) return { kind: "value", value: "automatic" };
-  if (choice === messages.strategyFixed) return { kind: "value", value: "fixed" };
-  if (choice === messages.strategyPublicOnly) return { kind: "value", value: "public-only" };
-  return { kind: "exit" };
+function padLine(text: string, width: number): string {
+  const clipped = truncateToWidth(text, Math.max(1, width));
+  return `${clipped}${" ".repeat(Math.max(0, width - visibleWidth(clipped)))}`;
 }
 
-async function chooseAutomaticRange(
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-): Promise<StepChoice<"all" | "custom">> {
-  const choice = await ctx.ui.select(messages.automaticRangeTitle, [
-    messages.automaticRangeAll,
-    messages.automaticRangeCustom,
-    messages.back,
-  ]);
-  if (choice === undefined) return { kind: "exit" };
-  if (choice === messages.back) return { kind: "back" };
-  if (choice === messages.automaticRangeAll) return { kind: "value", value: "all" };
-  if (choice === messages.automaticRangeCustom) return { kind: "value", value: "custom" };
-  return { kind: "exit" };
+function visibleSlice<T>(items: T[], cursor: number, limit = 7): { start: number; items: T[] } {
+  const start = Math.max(0, Math.min(cursor - Math.floor(limit / 2), items.length - limit));
+  return { start, items: items.slice(start, start + limit) };
 }
-
-async function refreshModels(
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-  dependencies: EyesSetupDependencies,
-): Promise<void> {
-  if (!dependencies.refreshModels) return;
-  try {
-    await dependencies.refreshModels(ctx);
-    ctx.signal.throwIfAborted();
-    ctx.ui.notify(messages.refreshComplete, "info");
-  } catch (error) {
-    if (isCancellation(error, ctx)) throw error;
-    ctx.ui.notify(messages.refreshFailed(errorText(error)), "error");
-  }
-}
-
-async function manageAutomaticCandidates(
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-  dependencies: EyesSetupDependencies,
-  initial: VisionModelRef[] | null,
-): Promise<StepChoice<VisionModelRef[] | null>> {
-  let initialized = false;
-  const selected = new Set<string>();
-
-  while (true) {
-    const candidates = discoverVisionModels(ctx);
-    const availableKeys = new Set(candidates.map((candidate) => modelKey(candidate.model)));
-    if (!initialized) {
-      const initialKeys = initial === null ? availableKeys : new Set(initial.map(refKey));
-      for (const key of initialKeys) {
-        if (availableKeys.has(key)) selected.add(key);
-      }
-      initialized = true;
-    } else {
-      for (const key of selected) {
-        if (!availableKeys.has(key)) selected.delete(key);
-      }
-    }
-
-    const labels = candidates.map((candidate) => {
-      const marker = selected.has(modelKey(candidate.model)) ? "[x]" : "[ ]";
-      return `${marker} ${formatModelLabel(candidate, messages)}`;
-    });
-    const options = [...labels, messages.automaticCandidatesDone, messages.automaticRangeAll];
-    if (dependencies.refreshModels) options.push(messages.refreshModels);
-    options.push(messages.back);
-
-    const title = candidates.length === 0
-      ? `${messages.automaticCandidatesTitle(0, 0)}\n${messages.noUsableVisionModels}`
-      : messages.automaticCandidatesTitle(selected.size, candidates.length);
-    const choice = await ctx.ui.select(title, options);
-    if (choice === undefined) return { kind: "exit" };
-    if (choice === messages.back) return { kind: "back" };
-    if (choice === messages.automaticRangeAll) return { kind: "value", value: null };
-    if (choice === messages.automaticCandidatesDone) {
-      return {
-        kind: "value",
-        value: candidates
-          .filter((candidate) => selected.has(modelKey(candidate.model)))
-          .map((candidate) => modelRef(candidate.model)),
-      };
-    }
-    if (choice === messages.refreshModels && dependencies.refreshModels) {
-      await refreshModels(ctx, messages, dependencies);
-      continue;
-    }
-    const index = labels.indexOf(choice);
-    if (index < 0) return { kind: "exit" };
-    const key = modelKey(candidates[index].model);
-    if (selected.has(key)) selected.delete(key);
-    else selected.add(key);
-  }
-}
-
-async function chooseFixedModel(
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-  dependencies: EyesSetupDependencies,
-): Promise<StepChoice<VisionModelCandidate>> {
-  while (true) {
-    const candidates = discoverVisionModels(ctx);
-    const labels = candidates.map((candidate) => formatModelLabel(candidate, messages));
-    const options = [...labels];
-    if (dependencies.refreshModels) options.push(messages.refreshModels);
-    options.push(messages.back);
-    const title = candidates.length === 0
-      ? `${messages.modelTitle}\n${messages.noUsableVisionModels}`
-      : messages.modelTitle;
-    const choice = await ctx.ui.select(title, options);
-    if (choice === undefined) return { kind: "exit" };
-    if (choice === messages.back) return { kind: "back" };
-    if (choice === messages.refreshModels && dependencies.refreshModels) {
-      await refreshModels(ctx, messages, dependencies);
-      continue;
-    }
-    const index = labels.indexOf(choice);
-    if (index < 0) return { kind: "exit" };
-    return { kind: "value", value: candidates[index] };
-  }
-}
-
-async function choosePublicFallback(
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-): Promise<StepChoice<boolean>> {
-  const choice = await ctx.ui.select(messages.publicFallbackTitle, [
-    messages.publicFallbackEnabled,
-    messages.publicFallbackDisabled,
-    messages.back,
-  ]);
-  if (choice === undefined) return { kind: "exit" };
-  if (choice === messages.back) return { kind: "back" };
-  if (choice === messages.publicFallbackEnabled) return { kind: "value", value: true };
-  if (choice === messages.publicFallbackDisabled) return { kind: "value", value: false };
-  return { kind: "exit" };
-}
-
-async function runSelectedModelTest(
-  candidate: VisionModelCandidate,
-  ctx: ExtensionCommandContext,
-  messages: EyesSetupMessages,
-  dependencies: EyesSetupDependencies,
-): Promise<ModelTestResult> {
-  if (!dependencies.testModel) return { ok: true };
-  let result: ModelTestResult;
-  try {
-    result = await dependencies.testModel(candidate.model, ctx);
-    ctx.signal.throwIfAborted();
-  } catch (error) {
-    if (isCancellation(error, ctx)) throw error;
-    result = { ok: false, message: errorText(error) };
-  }
-  if (result.ok) {
-    ctx.ui.notify(messages.testPassed, "info");
-    return result;
-  }
-  ctx.ui.notify(messages.testFailed(result.message || messages.modelUnavailable), "error");
-  return result;
-}
-
-type WizardStep =
-  | "language"
-  | "scope"
-  | "strategy"
-  | "automaticRange"
-  | "automaticCandidates"
-  | "model"
-  | "test"
-  | "testFailed"
-  | "publicFallback"
-  | "review";
 
 export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDependencies): void {
   pi.registerCommand("pi-eyes", {
     description: getEyesSetupMessages("zh-CN").commandDescription,
     handler: async (_args, ctx) => {
-      if (!ctx.hasUI) throw new Error(getEyesSetupMessages("zh-CN").nonInteractive);
-
-      const current = await dependencies.loadConfig(ctx);
-      let language = current?.language ?? "zh-CN";
-      let scope: SetupScope | undefined;
-      let mode: VisionRouteMode | undefined;
-      let allowedModels = current?.backend.route.allowedModels ?? null;
-      let candidate: VisionModelCandidate | undefined;
-      let publicFallbackEnabled = current?.backend.ovhPublicChain.enabled ?? true;
-      let testFailure = "";
-      let step: WizardStep = "language";
-      const history: WizardStep[] = [];
-
-      const next = (nextStep: WizardStep) => {
-        history.push(step);
-        step = nextStep;
-      };
-      const back = (): boolean => {
-        const previous = history.pop();
-        if (!previous) return false;
-        step = previous;
-        return true;
-      };
-      const returnTo = (target: WizardStep) => {
-        const index = history.lastIndexOf(target);
-        history.length = index < 0 ? 0 : index;
-        step = target;
-      };
-
-      while (true) {
-        const messages = getEyesSetupMessages(language);
-
-        if (step === "language") {
-          const selected = await chooseLanguage(ctx, language);
-          if (!selected) return;
-          language = selected;
-          next("scope");
-          continue;
-        }
-
-        if (step === "scope") {
-          const selected = await chooseScope(ctx, messages);
-          if (selected.kind === "exit") return;
-          if (selected.kind === "back") {
-            if (!back()) return;
-            continue;
-          }
-          scope = selected.value;
-          next("strategy");
-          continue;
-        }
-
-        if (step === "strategy") {
-          const selected = await chooseRoute(ctx, messages, current);
-          if (selected.kind === "exit") return;
-          if (selected.kind === "back") {
-            if (!back()) return;
-            continue;
-          }
-          mode = selected.value;
-          if (mode === "automatic") next("automaticRange");
-          else if (mode === "fixed") next("model");
-          else {
-            publicFallbackEnabled = true;
-            next("review");
-          }
-          continue;
-        }
-
-        if (step === "automaticRange") {
-          const selected = await chooseAutomaticRange(ctx, messages);
-          if (selected.kind === "exit") return;
-          if (selected.kind === "back") {
-            if (!back()) return;
-            continue;
-          }
-          if (selected.value === "all") {
-            allowedModels = null;
-            next("publicFallback");
-          } else {
-            next("automaticCandidates");
-          }
-          continue;
-        }
-
-        if (step === "automaticCandidates") {
-          const selected = await manageAutomaticCandidates(ctx, messages, dependencies, allowedModels);
-          if (selected.kind === "exit") return;
-          if (selected.kind === "back") {
-            if (!back()) return;
-            continue;
-          }
-          allowedModels = selected.value;
-          next("publicFallback");
-          continue;
-        }
-
-        if (step === "model") {
-          const selected = await chooseFixedModel(ctx, messages, dependencies);
-          if (selected.kind === "exit") return;
-          if (selected.kind === "back") {
-            if (!back()) return;
-            continue;
-          }
-          candidate = selected.value;
-          next(dependencies.testModel ? "test" : "publicFallback");
-          continue;
-        }
-
-        if (step === "test") {
-          if (!candidate) {
-            returnTo("model");
-            continue;
-          }
-          if (!isCandidateAvailable(candidate, ctx)) {
-            ctx.ui.notify(messages.modelUnavailable, "warning");
-            candidate = undefined;
-            returnTo("model");
-            continue;
-          }
-          const label = `${candidate.model.provider}/${candidate.model.id}`;
-          const choice = await ctx.ui.select(
-            `${messages.testTitle}\n${messages.testQuestion(label)}`,
-            [messages.testNow, messages.testSkip, messages.back],
-          );
-          if (choice === undefined) return;
-          if (choice === messages.back) {
-            if (!back()) return;
-            continue;
-          }
-          if (choice === messages.testSkip) {
-            next("publicFallback");
-            continue;
-          }
-          if (choice !== messages.testNow) return;
-          const result = await runSelectedModelTest(candidate, ctx, messages, dependencies);
-          if (result.ok) next("publicFallback");
-          else {
-            testFailure = result.message || messages.modelUnavailable;
-            next("testFailed");
-          }
-          continue;
-        }
-
-        if (step === "testFailed") {
-          if (!candidate || !isCandidateAvailable(candidate, ctx)) {
-            ctx.ui.notify(messages.modelUnavailable, "warning");
-            candidate = undefined;
-            returnTo("model");
-            continue;
-          }
-          const choice = await ctx.ui.select(
-            messages.testFailed(testFailure || messages.modelUnavailable),
-            [messages.testRetry, messages.testUseAnyway, messages.back],
-          );
-          if (choice === undefined) return;
-          if (choice === messages.back) {
-            if (!back()) return;
-            continue;
-          }
-          if (choice === messages.testUseAnyway) {
-            next("publicFallback");
-            continue;
-          }
-          if (choice !== messages.testRetry) return;
-          const result = await runSelectedModelTest(candidate, ctx, messages, dependencies);
-          if (result.ok) next("publicFallback");
-          else testFailure = result.message || messages.modelUnavailable;
-          continue;
-        }
-
-        if (step === "publicFallback") {
-          const selected = await choosePublicFallback(ctx, messages);
-          if (selected.kind === "exit") return;
-          if (selected.kind === "back") {
-            if (!back()) return;
-            continue;
-          }
-          if (!selected.value && mode === "automatic" && allowedModels?.length === 0) {
-            ctx.ui.notify(messages.atLeastOneBackend, "warning");
-            continue;
-          }
-          publicFallbackEnabled = selected.value;
-          next("review");
-          continue;
-        }
-
-        if (!scope || !mode) {
-          if (!back()) return;
-          continue;
-        }
-        if (mode === "fixed" && (!candidate || !isCandidateAvailable(candidate, ctx))) {
-          ctx.ui.notify(messages.modelUnavailable, "warning");
-          candidate = undefined;
-          returnTo("model");
-          continue;
-        }
-        const staleAllowed = mode === "automatic" ? unavailableAllowedModels(allowedModels, ctx) : [];
-        if (staleAllowed.length > 0) {
-          ctx.ui.notify(
-            messages.modelsUnavailable(staleAllowed.map((model) => `${model.provider}/${model.model}`)),
-            "warning",
-          );
-          const stale = new Set(staleAllowed.map(refKey));
-          allowedModels = allowedModels?.filter((model) => !stale.has(refKey(model))) ?? null;
-          returnTo("automaticCandidates");
-          continue;
-        }
-
-        const route = {
-          mode,
-          allowedModels,
-          ...(mode === "fixed" && candidate ? { fixedModel: modelRef(candidate.model) } : {}),
-        };
-        const config: EyesSetupConfig = {
-          schemaVersion: 2,
-          language,
-          backend: {
-            route,
-            ovhPublicChain: { enabled: mode === "public-only" ? true : publicFallbackEnabled },
-          },
-        };
-        const scopeLabel = scope === "project" ? messages.scopeProject : messages.scopeGlobal;
-        const modelLabel = mode === "automatic"
-          ? allowedModels === null
-            ? messages.allAvailableVisionModels
-            : allowedModels.length === 0
-              ? messages.noSelectedVisionModels
-              : allowedModels.map((model) => `${model.provider}/${model.model}`).join(", ")
-          : mode === "fixed" && candidate
-            ? `${candidate.model.provider}/${candidate.model.id}`
-            : messages.publicModel;
-        const publicLabel = config.backend.ovhPublicChain.enabled
-          ? messages.publicFallbackOn
-          : messages.publicFallbackOff;
-        const choice = await ctx.ui.select(
-          `${messages.confirmTitle}\n${messages.confirmMessage(
-            scopeLabel,
-            routeLabel(mode, messages),
-            modelLabel,
-            publicLabel,
-          )}`,
-          [messages.saveConfiguration, messages.back],
-        );
-        if (choice === undefined) return;
-        if (choice === messages.back) {
-          if (!back()) return;
-          continue;
-        }
-        if (choice !== messages.saveConfiguration) return;
-
-        if (mode === "fixed" && (!candidate || !isCandidateAvailable(candidate, ctx))) {
-          ctx.ui.notify(messages.modelUnavailable, "warning");
-          candidate = undefined;
-          returnTo("model");
-          continue;
-        }
-        const staleBeforeSave = mode === "automatic" ? unavailableAllowedModels(allowedModels, ctx) : [];
-        if (staleBeforeSave.length > 0) {
-          ctx.ui.notify(
-            messages.modelsUnavailable(staleBeforeSave.map((model) => `${model.provider}/${model.model}`)),
-            "warning",
-          );
-          const stale = new Set(staleBeforeSave.map(refKey));
-          allowedModels = allowedModels?.filter((model) => !stale.has(refKey(model))) ?? null;
-          returnTo("automaticCandidates");
-          continue;
-        }
-
-        try {
-          await dependencies.saveConfig(scope, config, ctx);
-        } catch (error) {
-          if (isCancellation(error, ctx)) throw error;
-          ctx.ui.notify(messages.saveFailed(errorText(error)), "error");
-          continue;
-        }
-        ctx.ui.notify(scope === "project" ? messages.savedProject : messages.savedGlobal, "info");
-        return;
+      if (ctx.mode !== "tui" || !ctx.hasUI) {
+        throw new Error(getEyesSetupMessages("zh-CN").nonInteractive);
       }
+
+      const loaded = await dependencies.loadConfig(ctx);
+      const current = loaded?.config;
+      let projectOverrideActive = loaded?.projectOverrideActive ?? false;
+      let language = current?.language ?? "zh-CN";
+      let mode = current?.backend.route.mode ?? "automatic";
+      let ovhEnabled = current?.backend.ovhPublicChain.enabled ?? true;
+      let candidates = discoverVisionModels(ctx);
+      const availableKeys = new Set(candidates.map((candidate) => modelKey(candidate.model)));
+      const configuredAllowed = current?.backend.route.allowedModels;
+      let autoSelectsAll = configuredAllowed === null || configuredAllowed === undefined;
+      const autoSelected = new Set(
+        (autoSelectsAll
+          ? candidates.map((candidate) => modelKey(candidate.model))
+          : configuredAllowed.map(refKey))
+          .filter((key) => availableKeys.has(key)),
+      );
+      let fixedKey = current?.backend.route.fixedModel
+        ? refKey(current.backend.route.fixedModel)
+        : undefined;
+      if (fixedKey && !availableKeys.has(fixedKey)) fixedKey = undefined;
+      if (mode === "public-only") ovhEnabled = true;
+
+      await ctx.ui.custom<boolean>((tui, theme, _keybindings, done) => {
+        let pane: ModelPane = "selected";
+        let selectedCursor = 0;
+        let availableCursor = 0;
+        let busy: BusyAction | undefined;
+        let actionController: AbortController | undefined;
+        let detachParentAbort: (() => void) | undefined;
+        let status = "";
+        let closed = false;
+
+        const messages = () => getEyesSetupMessages(language);
+        const chosenKeys = (): Set<string> => {
+          if (mode === "automatic") return autoSelected;
+          if (mode === "fixed" && fixedKey) return new Set([fixedKey]);
+          return new Set();
+        };
+        const selectedCandidates = (): VisionModelCandidate[] => {
+          const selected = chosenKeys();
+          return candidates.filter((candidate) => selected.has(modelKey(candidate.model)));
+        };
+        const availableCandidates = (): VisionModelCandidate[] => {
+          const selected = chosenKeys();
+          return candidates.filter((candidate) => !selected.has(modelKey(candidate.model)));
+        };
+        const clampCursors = () => {
+          selectedCursor = Math.max(0, Math.min(selectedCursor, selectedCandidates().length - 1));
+          availableCursor = Math.max(0, Math.min(availableCursor, availableCandidates().length - 1));
+        };
+        const refresh = () => {
+          clampCursors();
+          tui.requestRender();
+        };
+        const label = (candidate: VisionModelCandidate): string => {
+          const suffix = candidate.status === "authenticated"
+            ? messages().modelStatusAuthenticated
+            : messages().modelStatusNoAuthRequired;
+          return `${candidate.model.provider}/${candidate.model.id} · ${suffix}`;
+        };
+        const replaceCandidates = (next: VisionModelCandidate[], selectNewWhenAllSelected: boolean) => {
+          const previousKeys = new Set(candidates.map((candidate) => modelKey(candidate.model)));
+          const nextKeys = new Set(next.map((candidate) => modelKey(candidate.model)));
+          for (const key of autoSelected) {
+            if (!nextKeys.has(key)) autoSelected.delete(key);
+          }
+          if (selectNewWhenAllSelected && autoSelectsAll) {
+            for (const candidate of next) {
+              const key = modelKey(candidate.model);
+              if (!previousKeys.has(key)) autoSelected.add(key);
+            }
+          }
+          if (fixedKey && !nextKeys.has(fixedKey)) fixedKey = undefined;
+          candidates = next;
+          clampCursors();
+        };
+        const selectedForTest = (): VisionModelCandidate | undefined => {
+          const list = pane === "selected" ? selectedCandidates() : availableCandidates();
+          const cursor = pane === "selected" ? selectedCursor : availableCursor;
+          return list[cursor];
+        };
+        const moveCurrentModel = () => {
+          if (mode === "public-only") {
+            status = messages().publicOnlyModelHint;
+            refresh();
+            return;
+          }
+          if (pane === "selected") {
+            const selected = selectedCandidates();
+            const candidate = selected[selectedCursor];
+            if (!candidate) return;
+            const key = modelKey(candidate.model);
+            if (mode === "automatic") autoSelected.delete(key);
+            else fixedKey = undefined;
+            availableCursor = availableCandidates().findIndex((item) => modelKey(item.model) === key);
+            if (mode === "automatic") autoSelectsAll = false;
+            refresh();
+            return;
+          }
+          const available = availableCandidates();
+          const candidate = available[availableCursor];
+          if (!candidate) return;
+          const key = modelKey(candidate.model);
+          if (mode === "automatic") {
+            autoSelected.add(key);
+            autoSelectsAll = autoSelected.size === candidates.length;
+          }
+          else fixedKey = key;
+          selectedCursor = selectedCandidates().findIndex((item) => modelKey(item.model) === key);
+          refresh();
+        };
+        const cycleMode = () => {
+          mode = mode === "automatic" ? "fixed" : mode === "fixed" ? "public-only" : "automatic";
+          if (mode === "public-only") ovhEnabled = true;
+          status = "";
+          refresh();
+        };
+        const startCancellableAction = (): AbortSignal => {
+          const controller = new AbortController();
+          const parentSignal = ctx.signal;
+          const abortFromParent = () => controller.abort(parentSignal?.reason);
+          if (parentSignal?.aborted) abortFromParent();
+          else parentSignal?.addEventListener("abort", abortFromParent, { once: true });
+          actionController = controller;
+          detachParentAbort = () => parentSignal?.removeEventListener("abort", abortFromParent);
+          return controller.signal;
+        };
+        const finishCancellableAction = () => {
+          detachParentAbort?.();
+          detachParentAbort = undefined;
+          actionController = undefined;
+        };
+        const runRefresh = async () => {
+          if (!dependencies.refreshModels) {
+            status = messages().refreshUnavailable;
+            refresh();
+            return;
+          }
+          busy = "refresh";
+          status = messages().refreshRunning;
+          refresh();
+          const signal = startCancellableAction();
+          try {
+            await dependencies.refreshModels(ctx, signal);
+            signal.throwIfAborted();
+            if (closed) return;
+            replaceCandidates(discoverVisionModels(ctx), true);
+            status = messages().refreshComplete;
+          } catch (error) {
+            if (closed) return;
+            if (signal.aborted) {
+              closed = true;
+              done(false);
+              return;
+            }
+            status = messages().refreshFailed(errorText(error));
+          } finally {
+            finishCancellableAction();
+            busy = undefined;
+            if (!closed) refresh();
+          }
+        };
+        const runTest = async () => {
+          if (!dependencies.testModel) {
+            status = messages().testUnavailable;
+            refresh();
+            return;
+          }
+          const candidate = selectedForTest();
+          if (!candidate) {
+            status = mode === "fixed" ? messages().fixedModelRequired : messages().emptySelected;
+            refresh();
+            return;
+          }
+          const name = `${candidate.model.provider}/${candidate.model.id}`;
+          busy = "test";
+          status = messages().testRunning(name);
+          refresh();
+          const signal = startCancellableAction();
+          try {
+            const result = await dependencies.testModel(candidate.model, ctx, signal);
+            signal.throwIfAborted();
+            if (closed) return;
+            status = result.ok
+              ? messages().testPassed(name)
+              : messages().testFailed(name, result.message || "unknown error");
+          } catch (error) {
+            if (closed) return;
+            if (signal.aborted) {
+              closed = true;
+              done(false);
+              return;
+            }
+            status = messages().testFailed(name, errorText(error));
+          } finally {
+            finishCancellableAction();
+            busy = undefined;
+            if (!closed) refresh();
+          }
+        };
+        const runSave = async () => {
+          const latest = discoverVisionModels(ctx);
+          if (!sameKeys(candidates, latest)) {
+            replaceCandidates(latest, true);
+            status = messages().modelsChanged;
+            refresh();
+            return;
+          }
+          const selected = selectedCandidates();
+          if (mode === "fixed" && selected.length !== 1) {
+            status = messages().fixedModelRequired;
+            refresh();
+            return;
+          }
+          if (mode === "automatic" && selected.length === 0 && !ovhEnabled) {
+            status = messages().atLeastOneBackend;
+            refresh();
+            return;
+          }
+          if (mode === "public-only" && !ovhEnabled) {
+            status = messages().publicChainRequired;
+            refresh();
+            return;
+          }
+          const effectiveMode = mode === "automatic" && selected.length === 0 && !autoSelectsAll
+            ? "public-only"
+            : mode;
+          const allSelected = selected.length === candidates.length;
+          const config: EyesSetupConfig = {
+            schemaVersion: 2,
+            language,
+            backend: {
+              route: {
+                mode: effectiveMode,
+                allowedModels: effectiveMode === "automatic"
+                  ? autoSelectsAll || allSelected ? null : selected.map((candidate) => modelRef(candidate.model))
+                  : null,
+                ...(effectiveMode === "fixed" ? { fixedModel: modelRef(selected[0].model) } : {}),
+              },
+              ovhPublicChain: { enabled: effectiveMode === "public-only" ? true : ovhEnabled },
+            },
+          };
+          busy = "save";
+          status = messages().saveRunning;
+          refresh();
+          try {
+            const result = await dependencies.saveConfig(config, ctx);
+            if (closed) return;
+            projectOverrideActive = result.projectOverrideActive;
+            ctx.ui.notify(
+              projectOverrideActive ? messages().savedWithProjectOverride : messages().savedGlobal,
+              projectOverrideActive ? "warning" : "info",
+            );
+            closed = true;
+            done(true);
+          } catch (error) {
+            if (ctx.signal?.aborted) {
+              closed = true;
+              done(false);
+              return;
+            }
+            status = messages().saveFailed(errorText(error));
+            busy = undefined;
+            refresh();
+          }
+        };
+        const renderList = (
+          list: VisionModelCandidate[],
+          cursor: number,
+          focused: boolean,
+          empty: string,
+          width: number,
+          limit: number,
+        ): string[] => {
+          if (list.length === 0) return [theme.fg("dim", truncateToWidth(empty, width))];
+          const view = visibleSlice(list, cursor, limit);
+          const lines = view.items.map((candidate, index) => {
+            const selected = view.start + index === cursor;
+            const prefix = selected ? "> " : "  ";
+            const text = truncateToWidth(`${prefix}${label(candidate)}`, width);
+            return selected && focused ? theme.fg("accent", text) : text;
+          });
+          if (view.start > 0) lines.unshift(theme.fg("dim", "  ↑"));
+          if (view.start + view.items.length < list.length) lines.push(theme.fg("dim", "  ↓"));
+          return lines;
+        };
+        const render = (width: number): string[] => {
+          const renderWidth = Math.max(1, width);
+          const clip = (text: string) => truncateToWidth(text, renderWidth);
+          const copy = messages();
+          const selected = selectedCandidates();
+          const available = availableCandidates();
+          const languageLabel = language === "zh-CN" ? copy.languageChinese : copy.languageEnglish;
+          const ovhLabel = ovhEnabled ? copy.enabled : copy.disabled;
+          const lines = [
+            clip(theme.fg("accent", theme.bold(copy.windowTitle))),
+            clip(theme.fg("dim", copy.globalConfiguration)),
+          ];
+          if (projectOverrideActive) {
+            lines.push(clip(theme.fg("warning", copy.projectOverrideWarning)));
+          }
+          lines.push(
+            "",
+            clip(`${copy.languageLabel}: ${theme.fg("accent", languageLabel)}    ${copy.routeLabel}: ${theme.fg("accent", routeLabel(mode, copy))}    ${copy.ovhLabel}: ${theme.fg("accent", ovhLabel)}`),
+            "",
+          );
+          const selectedTitle = `${pane === "selected" ? ">" : " "} ${copy.selectedModels} (${selected.length})`;
+          const availableTitle = `${pane === "available" ? ">" : " "} ${copy.availableModels} (${available.length})`;
+          const listLimit = width >= 72 ? 7 : 4;
+          const selectedLines = renderList(selected, selectedCursor, pane === "selected", copy.emptySelected, renderWidth, listLimit);
+          const availableLines = renderList(available, availableCursor, pane === "available", copy.emptyAvailable, renderWidth, listLimit);
+          if (width >= 72) {
+            const gap = 3;
+            const leftWidth = Math.floor((width - gap) / 2);
+            const rightWidth = Math.max(1, width - gap - leftWidth);
+            lines.push(
+              `${theme.fg(pane === "selected" ? "accent" : "muted", padLine(selectedTitle, leftWidth))}${" ".repeat(gap)}${theme.fg(pane === "available" ? "accent" : "muted", padLine(availableTitle, rightWidth))}`,
+            );
+            const rows = Math.max(selectedLines.length, availableLines.length, 1);
+            for (let index = 0; index < rows; index += 1) {
+              lines.push(`${padLine(selectedLines[index] || "", leftWidth)}${" ".repeat(gap)}${padLine(availableLines[index] || "", rightWidth)}`);
+            }
+          } else {
+            lines.push(clip(theme.fg(pane === "selected" ? "accent" : "muted", selectedTitle)), ...selectedLines, "");
+            lines.push(clip(theme.fg(pane === "available" ? "accent" : "muted", availableTitle)), ...availableLines);
+          }
+          lines.push("", status ? clip(theme.fg(busy ? "warning" : "muted", status)) : "");
+          lines.push(clip(theme.fg("dim", copy.help)));
+          return lines;
+        };
+        const handleInput = (data: string) => {
+          if (busy) {
+            if (busy !== "save" && matchesKey(data, Key.escape)) {
+              actionController?.abort(new DOMException("Cancelled", "AbortError"));
+              closed = true;
+              done(false);
+            }
+            return;
+          }
+          if (matchesKey(data, Key.escape)) {
+            closed = true;
+            done(false);
+            return;
+          }
+          if (matchesKey(data, Key.tab) || matchesKey(data, Key.left) || matchesKey(data, Key.right)) {
+            pane = pane === "selected" ? "available" : "selected";
+            status = "";
+            refresh();
+            return;
+          }
+          if (matchesKey(data, Key.up) || matchesKey(data, Key.down)) {
+            const delta = matchesKey(data, Key.up) ? -1 : 1;
+            if (pane === "selected") selectedCursor += delta;
+            else availableCursor += delta;
+            status = "";
+            refresh();
+            return;
+          }
+          if (matchesKey(data, Key.enter) || matchesKey(data, Key.space)) {
+            status = "";
+            moveCurrentModel();
+            return;
+          }
+          if (matchesKey(data, "m")) {
+            cycleMode();
+            return;
+          }
+          if (matchesKey(data, "l")) {
+            language = language === "zh-CN" ? "en" : "zh-CN";
+            status = "";
+            refresh();
+            return;
+          }
+          if (matchesKey(data, "o")) {
+            if (mode === "public-only") status = messages().publicChainRequired;
+            else {
+              ovhEnabled = !ovhEnabled;
+              status = "";
+            }
+            refresh();
+            return;
+          }
+          if (matchesKey(data, Key.ctrl("r"))) {
+            void runRefresh();
+            return;
+          }
+          if (matchesKey(data, Key.ctrl("t"))) {
+            void runTest();
+            return;
+          }
+          if (matchesKey(data, Key.ctrl("s"))) void runSave();
+        };
+
+        return { render, handleInput, invalidate: () => {} };
+      });
+
+      ctx.signal?.throwIfAborted();
     },
   });
 }

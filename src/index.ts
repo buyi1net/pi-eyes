@@ -22,10 +22,11 @@ import {
   getPiEyesConfigPaths,
   loadPiEyesConfig,
   savePiEyesConfig,
+  type LoadedPiEyesConfig,
   type ResolvedPiEyesConfig,
 } from "./config";
 import { testPiVisionModel } from "./pi-model-backend";
-import { registerEyesSetup, type EyesSetupConfig, type SetupScope } from "./setup";
+import { registerEyesSetup, type EyesSetupConfig } from "./setup";
 import { registerLookTools } from "./tools-look";
 import { registerPixelTools } from "./tools-pixels";
 import { imagePartFromPath } from "./pixels";
@@ -102,7 +103,7 @@ export default function (pi: ExtensionAPI) {
   const chain = new VisionChain();
   let activeConfig = DEFAULT_PI_EYES_CONFIG;
 
-  const applyConfig = async (ctx: ExtensionContext, showWarnings = false): Promise<ResolvedPiEyesConfig> => {
+  const applyConfig = async (ctx: ExtensionContext, showWarnings = false): Promise<LoadedPiEyesConfig> => {
     const loaded = await loadPiEyesConfig({
       ...configPaths(ctx),
       projectTrusted: ctx.isProjectTrusted(),
@@ -129,27 +130,30 @@ export default function (pi: ExtensionAPI) {
     if (showWarnings && ctx.hasUI) {
       for (const warning of loaded.warnings) ctx.ui.notify(warning, "warning");
     }
-    return activeConfig;
+    return loaded;
   };
 
   const saveSetupConfig = async (
-    scope: SetupScope,
     config: EyesSetupConfig,
     ctx: ExtensionCommandContext,
-  ): Promise<void> => {
-    if (scope === "project" && !ctx.isProjectTrusted()) {
-      throw new Error("当前项目未受信任，不能写入项目级 Pi Eyes 配置");
-    }
+  ): Promise<{ projectOverrideActive: boolean }> => {
     const paths = configPaths(ctx);
-    await savePiEyesConfig(scope === "project" ? paths.projectPath : paths.globalPath, setupUpdate(config));
-    await applyConfig(ctx, true);
+    await savePiEyesConfig(paths.globalPath, setupUpdate(config));
+    const loaded = await applyConfig(ctx, true);
+    return { projectOverrideActive: Boolean(loaded.projectLayer) };
   };
 
   registerEyesSetup(pi, {
-    loadConfig: async (ctx) => toSetupConfig(await applyConfig(ctx, true)),
+    loadConfig: async (ctx) => {
+      const loaded = await applyConfig(ctx, true);
+      return {
+        config: toSetupConfig(loaded.globalConfig),
+        projectOverrideActive: Boolean(loaded.projectLayer),
+      };
+    },
     saveConfig: saveSetupConfig,
-    refreshModels: async (ctx) => {
-      const result = await ctx.modelRegistry.refresh({ allowNetwork: false, signal: ctx.signal });
+    refreshModels: async (ctx, signal) => {
+      const result = await ctx.modelRegistry.refresh({ allowNetwork: false, signal: signal ?? ctx.signal });
       if (result.aborted) throw new Error("Pi 模型目录刷新已取消");
       if (result.errors.size > 0) {
         const details = [...result.errors.entries()]
@@ -158,13 +162,13 @@ export default function (pi: ExtensionAPI) {
         throw new Error(details);
       }
     },
-    testModel: async (model, ctx) => {
+    testModel: async (model, ctx, signal) => {
       const result = await testPiVisionModel(
         ctx.modelRegistry,
         { provider: model.provider, modelId: model.id },
         VISION_PROBE_IMAGE,
         VISION_PROBE_EXPECTED,
-        { signal: ctx.signal },
+        { signal: signal ?? ctx.signal },
       );
       return {
         ok: result.passed,

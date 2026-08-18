@@ -2,166 +2,128 @@ export type EyesSetupLanguage = "zh-CN" | "en";
 
 export interface EyesSetupMessages {
   commandDescription: string;
-  languageTitle: string;
+  windowTitle: string;
+  globalConfiguration: string;
+  projectOverrideWarning: string;
+  savedWithProjectOverride: string;
+  languageLabel: string;
   languageChinese: string;
   languageEnglish: string;
-  back: string;
-  scopeTitle: string;
-  scopeGlobal: string;
-  scopeProject: string;
-  strategyTitle: string;
-  strategyAutomatic: string;
-  strategyFixed: string;
-  strategyPublicOnly: string;
-  currentConfiguration: (route: string) => string;
-  automaticRangeTitle: string;
-  automaticRangeAll: string;
-  automaticRangeCustom: string;
-  automaticCandidatesTitle: (selected: number, available: number) => string;
-  automaticCandidatesDone: string;
-  modelTitle: string;
-  modelUnavailable: string;
-  modelsUnavailable: (models: string[]) => string;
+  routeLabel: string;
+  routeAutomatic: string;
+  routeFixed: string;
+  routePublicOnly: string;
+  ovhLabel: string;
+  enabled: string;
+  disabled: string;
+  selectedModels: string;
+  availableModels: string;
+  emptySelected: string;
+  emptyAvailable: string;
   modelStatusAuthenticated: string;
   modelStatusNoAuthRequired: string;
-  refreshModels: string;
+  help: string;
+  refreshRunning: string;
   refreshComplete: string;
+  refreshUnavailable: string;
   refreshFailed: (reason: string) => string;
-  noUsableVisionModels: string;
-  publicFallbackTitle: string;
-  publicFallbackEnabled: string;
-  publicFallbackDisabled: string;
-  atLeastOneBackend: string;
-  testTitle: string;
-  testQuestion: (model: string) => string;
-  testNow: string;
-  testSkip: string;
-  testPassed: string;
-  testFailed: (reason: string) => string;
-  testRetry: string;
-  testUseAnyway: string;
-  confirmTitle: string;
-  confirmMessage: (scope: string, route: string, models: string, publicChain: string) => string;
-  saveConfiguration: string;
-  allAvailableVisionModels: string;
-  noSelectedVisionModels: string;
-  publicModel: string;
-  publicFallbackOn: string;
-  publicFallbackOff: string;
+  testRunning: (model: string) => string;
+  testPassed: (model: string) => string;
+  testUnavailable: string;
+  testFailed: (model: string, reason: string) => string;
+  saveRunning: string;
   savedGlobal: string;
-  savedProject: string;
   saveFailed: (reason: string) => string;
+  fixedModelRequired: string;
+  atLeastOneBackend: string;
+  publicChainRequired: string;
+  publicOnlyModelHint: string;
+  modelsChanged: string;
   nonInteractive: string;
 }
 
 const ZH_CN: EyesSetupMessages = {
   commandDescription: "配置 Pi Eyes / Configure Pi Eyes",
-  languageTitle: "语言 / Language",
+  windowTitle: "Pi Eyes 视觉配置",
+  globalConfiguration: "配置会保存到 Pi 全局目录，对所有项目生效。",
+  projectOverrideWarning: "当前项目存在旧的项目级覆盖；这里仍只修改全局配置，当前项目继续以旧覆盖为准。",
+  savedWithProjectOverride: "Pi Eyes 全局配置已保存；当前项目仍由旧的项目级配置覆盖。",
+  languageLabel: "界面语言",
   languageChinese: "简体中文",
   languageEnglish: "English",
-  back: "← 返回上一步",
-  scopeTitle: "配置保存位置",
-  scopeGlobal: "全局（所有项目）",
-  scopeProject: "当前项目",
-  strategyTitle: "视觉路由",
-  strategyAutomatic: "自动选择 Pi 视觉模型",
-  strategyFixed: "手动指定 Pi 视觉模型",
-  strategyPublicOnly: "仅使用免密 OVH 公共链",
-  currentConfiguration: (route) => `当前配置：${route}`,
-  automaticRangeTitle: "自动选择可以使用哪些 Pi 视觉模型？",
-  automaticRangeAll: "所有当前可用的 Pi 视觉模型",
-  automaticRangeCustom: "管理候选模型",
-  automaticCandidatesTitle: (selected, available) => `管理候选模型（已选 ${selected}/${available}）`,
-  automaticCandidatesDone: "完成选择",
-  modelTitle: "选择 Pi 视觉模型",
-  modelUnavailable: "该 Pi 视觉模型当前不可用，请重新选择。",
-  modelsUnavailable: (models) => `这些 Pi 视觉模型已经不可用，请重新确认候选范围：${models.join("、")}`,
-  modelStatusAuthenticated: "已认证，可用",
-  modelStatusNoAuthRequired: "无需认证，可用",
-  refreshModels: "刷新 Pi 模型目录",
+  routeLabel: "视觉路由",
+  routeAutomatic: "自动选择",
+  routeFixed: "固定模型",
+  routePublicOnly: "仅公共链",
+  ovhLabel: "免密 OVH 公共链",
+  enabled: "开启",
+  disabled: "关闭",
+  selectedModels: "已选模型",
+  availableModels: "可选模型",
+  emptySelected: "（未选择 Pi 视觉模型）",
+  emptyAvailable: "（没有其它可用模型）",
+  modelStatusAuthenticated: "已认证",
+  modelStatusNoAuthRequired: "无需认证",
+  help: "Tab/←→ 切换列表  ↑↓ 定位  Enter/Space 移动模型  M 路由  O 公共链  L 语言  Ctrl+R 刷新  Ctrl+T 测试  Ctrl+S 保存  Esc 退出",
+  refreshRunning: "正在刷新 Pi 模型目录……",
   refreshComplete: "Pi 模型目录已刷新。",
+  refreshUnavailable: "当前环境不支持刷新 Pi 模型目录。",
   refreshFailed: (reason) => `刷新模型失败：${reason}`,
-  noUsableVisionModels: "Pi 当前没有可用的视觉模型。自动模式仍可使用免密 OVH 公共链。",
-  publicFallbackTitle: "Pi 视觉模型不可用时，是否使用免密 OVH 公共链？",
-  publicFallbackEnabled: "开启免密 OVH 公共链",
-  publicFallbackDisabled: "关闭免密 OVH 公共链",
-  atLeastOneBackend: "候选模型为空时必须开启免密 OVH 公共链。",
-  testTitle: "测试 Pi 视觉模型",
-  testQuestion: (model) => `现在测试 ${model} 的连接和图片输入能力吗？`,
-  testNow: "立即测试",
-  testSkip: "跳过测试并继续",
-  testPassed: "Pi 视觉模型测试通过。",
-  testFailed: (reason) => `Pi 视觉模型测试失败：${reason}`,
-  testRetry: "重新测试",
-  testUseAnyway: "仍然使用并继续",
-  confirmTitle: "保存配置",
-  confirmMessage: (scope, route, models, publicChain) =>
-    `保存位置：${scope}\n路由：${route}\nPi 视觉模型：${models}\n免密 OVH 公共链：${publicChain}`,
-  saveConfiguration: "保存配置",
-  allAvailableVisionModels: "所有当前可用模型",
-  noSelectedVisionModels: "未选择",
-  publicModel: "不使用",
-  publicFallbackOn: "开启",
-  publicFallbackOff: "关闭",
+  testRunning: (model) => `正在测试 ${model}……`,
+  testPassed: (model) => `${model} 测试通过。`,
+  testUnavailable: "当前环境不支持模型测试。",
+  testFailed: (model, reason) => `${model} 测试失败：${reason}`,
+  saveRunning: "正在保存全局配置……",
   savedGlobal: "Pi Eyes 全局配置已保存。",
-  savedProject: "Pi Eyes 当前项目配置已保存。",
   saveFailed: (reason) => `保存配置失败：${reason}`,
-  nonInteractive: "/pi-eyes 需要 Pi TUI 或支持扩展对话协议的 RPC 客户端；本次没有写入配置。 /pi-eyes requires Pi TUI or an RPC client with the extension UI protocol; no configuration was written.",
+  fixedModelRequired: "固定模型模式必须从右侧选择一个 Pi 视觉模型。",
+  atLeastOneBackend: "没有已选模型时必须开启免密 OVH 公共链。",
+  publicChainRequired: "仅公共链模式必须开启免密 OVH 公共链。",
+  publicOnlyModelHint: "仅公共链模式不使用 Pi 视觉模型；按 M 切换路由后再选择。",
+  modelsChanged: "Pi 可用模型已经变化，请核对左右列表后再次保存。",
+  nonInteractive: "/pi-eyes 只能在 Pi TUI 中打开；本次没有写入配置。 /pi-eyes is available only in the Pi TUI; no configuration was written.",
 };
 
 const EN: EyesSetupMessages = {
   commandDescription: "Configure Pi Eyes / 配置 Pi Eyes",
-  languageTitle: "Language / 语言",
+  windowTitle: "Pi Eyes vision settings",
+  globalConfiguration: "Settings are saved globally for every Pi project.",
+  projectOverrideWarning: "This project has a legacy project override. This screen still changes only the global settings; the project keeps using its override.",
+  savedWithProjectOverride: "Pi Eyes global settings saved; this project is still using its legacy project override.",
+  languageLabel: "Language",
   languageChinese: "简体中文",
   languageEnglish: "English",
-  back: "← Back",
-  scopeTitle: "Save configuration to",
-  scopeGlobal: "Global (all projects)",
-  scopeProject: "Current project",
-  strategyTitle: "Vision routing",
-  strategyAutomatic: "Automatically select a Pi vision model",
-  strategyFixed: "Manually select a Pi vision model",
-  strategyPublicOnly: "Use the keyless OVH public chain only",
-  currentConfiguration: (route) => `Current configuration: ${route}`,
-  automaticRangeTitle: "Which Pi vision models may automatic selection use?",
-  automaticRangeAll: "All currently available Pi vision models",
-  automaticRangeCustom: "Manage candidate models",
-  automaticCandidatesTitle: (selected, available) => `Manage candidate models (${selected}/${available} selected)`,
-  automaticCandidatesDone: "Finish selection",
-  modelTitle: "Choose a Pi vision model",
-  modelUnavailable: "This Pi vision model is no longer available. Choose another model.",
-  modelsUnavailable: (models) => `These Pi vision models are no longer available. Review the candidate list: ${models.join(", ")}`,
-  modelStatusAuthenticated: "Authenticated, available",
-  modelStatusNoAuthRequired: "No authentication required, available",
-  refreshModels: "Refresh Pi model catalogue",
+  routeLabel: "Vision route",
+  routeAutomatic: "Automatic",
+  routeFixed: "Fixed model",
+  routePublicOnly: "Public chain only",
+  ovhLabel: "Keyless OVH public chain",
+  enabled: "On",
+  disabled: "Off",
+  selectedModels: "Selected models",
+  availableModels: "Available models",
+  emptySelected: "(No Pi vision model selected)",
+  emptyAvailable: "(No other model available)",
+  modelStatusAuthenticated: "authenticated",
+  modelStatusNoAuthRequired: "no authentication required",
+  help: "Tab/←→ panes  ↑↓ navigate  Enter/Space move  M route  O public chain  L language  Ctrl+R refresh  Ctrl+T test  Ctrl+S save  Esc exit",
+  refreshRunning: "Refreshing the Pi model catalogue…",
   refreshComplete: "Pi model catalogue refreshed.",
+  refreshUnavailable: "Model refresh is not available in this environment.",
   refreshFailed: (reason) => `Could not refresh models: ${reason}`,
-  noUsableVisionModels: "Pi has no available vision model. Automatic mode can still use the keyless OVH public chain.",
-  publicFallbackTitle: "Use the keyless OVH public chain when the Pi vision model is unavailable?",
-  publicFallbackEnabled: "Enable the keyless OVH public chain",
-  publicFallbackDisabled: "Disable the keyless OVH public chain",
-  atLeastOneBackend: "Enable the keyless OVH public chain when no candidate model is selected.",
-  testTitle: "Test Pi vision model",
-  testQuestion: (model) => `Test ${model}'s connection and image input now?`,
-  testNow: "Test now",
-  testSkip: "Skip test and continue",
-  testPassed: "Pi vision model test passed.",
-  testFailed: (reason) => `Pi vision model test failed: ${reason}`,
-  testRetry: "Test again",
-  testUseAnyway: "Use it anyway and continue",
-  confirmTitle: "Save configuration",
-  confirmMessage: (scope, route, models, publicChain) =>
-    `Scope: ${scope}\nRoute: ${route}\nPi vision models: ${models}\nKeyless OVH public chain: ${publicChain}`,
-  saveConfiguration: "Save configuration",
-  allAvailableVisionModels: "All currently available models",
-  noSelectedVisionModels: "None selected",
-  publicModel: "Not used",
-  publicFallbackOn: "Enabled",
-  publicFallbackOff: "Disabled",
-  savedGlobal: "Pi Eyes global configuration saved.",
-  savedProject: "Pi Eyes project configuration saved.",
-  saveFailed: (reason) => `Could not save configuration: ${reason}`,
-  nonInteractive: "/pi-eyes requires Pi TUI or an RPC client with the extension UI protocol; no configuration was written.",
+  testRunning: (model) => `Testing ${model}…`,
+  testPassed: (model) => `${model} passed the vision test.`,
+  testUnavailable: "Model testing is not available in this environment.",
+  testFailed: (model, reason) => `${model} failed the vision test: ${reason}`,
+  saveRunning: "Saving global settings…",
+  savedGlobal: "Pi Eyes global settings saved.",
+  saveFailed: (reason) => `Could not save settings: ${reason}`,
+  fixedModelRequired: "Fixed model mode requires one Pi vision model from the right list.",
+  atLeastOneBackend: "Enable the keyless OVH public chain when no model is selected.",
+  publicChainRequired: "Public chain only mode requires the keyless OVH public chain.",
+  publicOnlyModelHint: "Public chain only mode does not use Pi vision models. Press M before selecting one.",
+  modelsChanged: "Pi's available models changed. Review both lists, then save again.",
+  nonInteractive: "/pi-eyes is available only in the Pi TUI; no configuration was written.",
 };
 
 export function getEyesSetupMessages(language: EyesSetupLanguage): EyesSetupMessages {
