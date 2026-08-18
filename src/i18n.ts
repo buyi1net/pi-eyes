@@ -5,6 +5,9 @@ export interface EyesSetupMessages {
   languageTitle: string;
   languageChinese: string;
   languageEnglish: string;
+  cancelSetupRoot: string;
+  back: string;
+  cancelSetup: string;
   scopeTitle: string;
   scopeGlobal: string;
   scopeProject: string;
@@ -28,11 +31,15 @@ export interface EyesSetupMessages {
   noUsableVisionModels: string;
   testTitle: string;
   testQuestion: (model: string) => string;
+  testNow: string;
+  testSkip: string;
   testPassed: string;
   testFailed: (reason: string) => string;
-  saveAfterFailedTest: string;
+  testRetry: string;
+  testUseAnyway: string;
   confirmTitle: string;
   confirmMessage: (scope: string, strategy: string, model: string) => string;
+  saveConfiguration: string;
   anonymousModel: string;
   savedGlobal: string;
   savedProject: string;
@@ -45,6 +52,9 @@ const ZH_CN: EyesSetupMessages = {
   languageTitle: "语言 / Language",
   languageChinese: "简体中文",
   languageEnglish: "English",
+  cancelSetupRoot: "取消配置 / Cancel setup",
+  back: "← 返回上一步",
+  cancelSetup: "取消配置",
   scopeTitle: "配置保存位置",
   scopeGlobal: "全局（所有项目）",
   scopeProject: "当前项目",
@@ -54,7 +64,7 @@ const ZH_CN: EyesSetupMessages = {
   strategyAnonymousOnly: "仅使用匿名模型链",
   modelTitle: "选择 Pi 视觉模型",
   modelManual: "手动输入 provider/model",
-  modelManualTitle: "输入 Pi 模型",
+  modelManualTitle: "输入 Pi 模型（取消返回模型列表）",
   modelManualPlaceholder: "provider/model",
   modelInvalid: "没有在 Pi 模型目录中找到这个模型。",
   modelNotVisual: "该模型没有声明图片输入能力。",
@@ -65,15 +75,19 @@ const ZH_CN: EyesSetupMessages = {
   refreshModels: "刷新 Pi 模型目录",
   refreshComplete: "Pi 模型目录已刷新。",
   refreshFailed: (reason) => `刷新模型失败：${reason}`,
-  noUsableVisionModels: "没有发现可用的 Pi 视觉模型。请取消本次配置，并重新选择匿名模型链。",
+  noUsableVisionModels: "没有发现可用的 Pi 视觉模型。请返回上一步并选择匿名模型链。",
   testTitle: "测试视觉模型",
   testQuestion: (model) => `现在测试 ${model} 的连接和图片输入能力吗？`,
+  testNow: "立即测试",
+  testSkip: "跳过测试并继续",
   testPassed: "视觉模型测试通过。",
   testFailed: (reason) => `视觉模型测试失败：${reason}`,
-  saveAfterFailedTest: "测试失败，仍然保存这个模型吗？",
+  testRetry: "重新测试",
+  testUseAnyway: "仍然使用并继续",
   confirmTitle: "保存配置",
   confirmMessage: (scope, strategy, model) =>
-    `保存位置：${scope}\n策略：${strategy}\n模型：${model}\n\n确认保存吗？`,
+    `保存位置：${scope}\n策略：${strategy}\n模型：${model}`,
+  saveConfiguration: "保存配置",
   anonymousModel: "匿名模型链",
   savedGlobal: "Pi Eyes 全局配置已保存。",
   savedProject: "Pi Eyes 当前项目配置已保存。",
@@ -86,6 +100,9 @@ const EN: EyesSetupMessages = {
   languageTitle: "Language / 语言",
   languageChinese: "简体中文",
   languageEnglish: "English",
+  cancelSetupRoot: "取消配置 / Cancel setup",
+  back: "← Back",
+  cancelSetup: "Cancel setup",
   scopeTitle: "Save configuration to",
   scopeGlobal: "Global (all projects)",
   scopeProject: "Current project",
@@ -95,7 +112,7 @@ const EN: EyesSetupMessages = {
   strategyAnonymousOnly: "Anonymous model chain only",
   modelTitle: "Choose a Pi vision model",
   modelManual: "Enter provider/model manually",
-  modelManualTitle: "Enter a Pi model",
+  modelManualTitle: "Enter a Pi model (cancel to return to the model list)",
   modelManualPlaceholder: "provider/model",
   modelInvalid: "This model was not found in Pi's model catalogue.",
   modelNotVisual: "This model does not declare image input support.",
@@ -106,15 +123,19 @@ const EN: EyesSetupMessages = {
   refreshModels: "Refresh Pi model catalogue",
   refreshComplete: "Pi model catalogue refreshed.",
   refreshFailed: (reason) => `Could not refresh models: ${reason}`,
-  noUsableVisionModels: "No usable Pi vision model was found. Cancel this setup and choose the anonymous model chain when you run it again.",
+  noUsableVisionModels: "No usable Pi vision model was found. Go back and choose the anonymous model chain.",
   testTitle: "Test vision model",
   testQuestion: (model) => `Test ${model}'s connection and image input now?`,
+  testNow: "Test now",
+  testSkip: "Skip test and continue",
   testPassed: "Vision model test passed.",
   testFailed: (reason) => `Vision model test failed: ${reason}`,
-  saveAfterFailedTest: "The test failed. Save this model anyway?",
+  testRetry: "Test again",
+  testUseAnyway: "Use it anyway and continue",
   confirmTitle: "Save configuration",
   confirmMessage: (scope, strategy, model) =>
-    `Scope: ${scope}\nStrategy: ${strategy}\nModel: ${model}\n\nSave this configuration?`,
+    `Scope: ${scope}\nStrategy: ${strategy}\nModel: ${model}`,
+  saveConfiguration: "Save configuration",
   anonymousModel: "Anonymous model chain",
   savedGlobal: "Pi Eyes global configuration saved.",
   savedProject: "Pi Eyes project configuration saved.",

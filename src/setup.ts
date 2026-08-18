@@ -57,23 +57,11 @@ function modelKey(model: Pick<Model<Api>, "provider" | "id">): string {
 }
 
 export function discoverVisionModels(ctx: ExtensionCommandContext): VisionModelCandidate[] {
-  const available = ctx.modelRegistry.getAvailable().filter((model) => model.input.includes("image"));
-  const availableKeys = new Set(available.map(modelKey));
-  const models = new Map<string, Model<Api>>();
-
-  for (const model of ctx.modelRegistry.getAll()) {
-    if (model.input.includes("image")) models.set(modelKey(model), model);
-  }
-  for (const model of available) models.set(modelKey(model), model);
-
-  return [...models.values()]
+  return ctx.modelRegistry.getAvailable()
+    .filter((model) => model.input.includes("image"))
     .map((model): VisionModelCandidate => ({
       model,
-      status: !availableKeys.has(modelKey(model))
-        ? "unavailable"
-        : ctx.modelRegistry.hasConfiguredAuth(model)
-          ? "authenticated"
-          : "no-auth-required",
+      status: ctx.modelRegistry.hasConfiguredAuth(model) ? "authenticated" : "no-auth-required",
     }))
     .sort((a, b) => {
       const statusOrder = { authenticated: 0, "no-auth-required": 1, unavailable: 2 } as const;
@@ -91,6 +79,10 @@ function formatModelLabel(candidate: VisionModelCandidate, messages: EyesSetupMe
   return `${candidate.model.provider}/${candidate.model.id} — ${status}`;
 }
 
+function isCandidateAvailable(candidate: VisionModelCandidate, ctx: ExtensionCommandContext): boolean {
+  return discoverVisionModels(ctx).some((item) => modelKey(item.model) === modelKey(candidate.model));
+}
+
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
 }
@@ -103,35 +95,49 @@ async function chooseLanguage(
   const choice = await ctx.ui.select(messages.languageTitle, [
     messages.languageChinese,
     messages.languageEnglish,
+    messages.cancelSetupRoot,
   ]);
-  if (choice === undefined) return undefined;
+  if (choice === undefined || choice === messages.cancelSetupRoot) return undefined;
   return choice === messages.languageEnglish ? "en" : "zh-CN";
 }
+
+type StepChoice<T> =
+  | { kind: "value"; value: T }
+  | { kind: "back" }
+  | { kind: "cancel" };
 
 async function chooseScope(
   ctx: ExtensionCommandContext,
   messages: EyesSetupMessages,
-): Promise<SetupScope | undefined> {
+): Promise<StepChoice<SetupScope>> {
   const options = [messages.scopeGlobal];
   if (ctx.isProjectTrusted()) options.push(messages.scopeProject);
-  const choice = await ctx.ui.select(messages.scopeTitle, options);
-  if (choice === undefined) return undefined;
-  return choice === messages.scopeProject ? "project" : "global";
+  const choice = await ctx.ui.select(messages.scopeTitle, [
+    ...options,
+    messages.back,
+    messages.cancelSetup,
+  ]);
+  if (choice === undefined || choice === messages.back) return { kind: "back" };
+  if (choice === messages.cancelSetup) return { kind: "cancel" };
+  return { kind: "value", value: choice === messages.scopeProject ? "project" : "global" };
 }
 
 async function chooseStrategy(
   ctx: ExtensionCommandContext,
   messages: EyesSetupMessages,
-): Promise<VisionBackendMode | undefined> {
+): Promise<StepChoice<VisionBackendMode>> {
   const choice = await ctx.ui.select(messages.strategyTitle, [
     messages.strategyAuto,
     messages.strategyPiOnly,
     messages.strategyAnonymousOnly,
+    messages.back,
+    messages.cancelSetup,
   ]);
-  if (choice === undefined) return undefined;
-  if (choice === messages.strategyPiOnly) return "pi-only";
-  if (choice === messages.strategyAnonymousOnly) return "anonymous-only";
-  return "auto";
+  if (choice === undefined || choice === messages.back) return { kind: "back" };
+  if (choice === messages.cancelSetup) return { kind: "cancel" };
+  if (choice === messages.strategyPiOnly) return { kind: "value", value: "pi-only" };
+  if (choice === messages.strategyAnonymousOnly) return { kind: "value", value: "anonymous-only" };
+  return { kind: "value", value: "auto" };
 }
 
 function findManualModel(
@@ -155,22 +161,26 @@ function findManualModel(
     ctx.ui.notify(messages.modelNotVisual, "error");
     return undefined;
   }
-  return discoverVisionModels(ctx).find((candidate) => modelKey(candidate.model) === modelKey(model));
+  const candidate = discoverVisionModels(ctx).find((item) => modelKey(item.model) === modelKey(model));
+  if (!candidate) ctx.ui.notify(messages.modelUnavailable, "warning");
+  return candidate;
 }
 
 async function chooseModel(
   ctx: ExtensionCommandContext,
   messages: EyesSetupMessages,
   dependencies: EyesSetupDependencies,
-): Promise<VisionModelCandidate | undefined> {
+): Promise<StepChoice<VisionModelCandidate>> {
   while (true) {
     const candidates = discoverVisionModels(ctx);
     const labels = candidates.map((candidate) => formatModelLabel(candidate, messages));
     const options = [...labels, messages.modelManual];
     if (dependencies.refreshModels) options.push(messages.refreshModels);
+    options.push(messages.back, messages.cancelSetup);
 
     const choice = await ctx.ui.select(messages.modelTitle, options);
-    if (choice === undefined) return undefined;
+    if (choice === undefined || choice === messages.back) return { kind: "back" };
+    if (choice === messages.cancelSetup) return { kind: "cancel" };
 
     if (choice === messages.refreshModels && dependencies.refreshModels) {
       try {
@@ -200,20 +210,17 @@ async function chooseModel(
       }
       continue;
     }
-    return candidate;
+    return { kind: "value", value: candidate };
   }
 }
 
-async function testSelectedModel(
+async function runSelectedModelTest(
   candidate: VisionModelCandidate,
   ctx: ExtensionCommandContext,
   messages: EyesSetupMessages,
   dependencies: EyesSetupDependencies,
-): Promise<boolean> {
-  if (!dependencies.testModel) return true;
-  const label = `${candidate.model.provider}/${candidate.model.id}`;
-  const shouldTest = await ctx.ui.confirm(messages.testTitle, messages.testQuestion(label));
-  if (!shouldTest) return true;
+): Promise<ModelTestResult> {
+  if (!dependencies.testModel) return { ok: true };
 
   let result: ModelTestResult;
   try {
@@ -223,12 +230,14 @@ async function testSelectedModel(
   }
   if (result.ok) {
     ctx.ui.notify(messages.testPassed, "info");
-    return true;
+    return result;
   }
 
   ctx.ui.notify(messages.testFailed(result.message || messages.modelUnavailable), "error");
-  return ctx.ui.confirm(messages.testTitle, messages.saveAfterFailedTest);
+  return result;
 }
+
+type WizardStep = "language" | "scope" | "strategy" | "model" | "test" | "testFailed" | "review";
 
 export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDependencies): void {
   pi.registerCommand("eyes-setup", {
@@ -237,47 +246,193 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
       if (!ctx.hasUI) throw new Error(getEyesSetupMessages("zh-CN").nonInteractive);
 
       const current = await dependencies.loadConfig(ctx);
-      const language = await chooseLanguage(ctx, current?.language ?? "zh-CN");
-      if (!language) return;
-      const messages = getEyesSetupMessages(language);
+      let language = current?.language ?? "zh-CN";
+      let scope: SetupScope | undefined;
+      let mode: VisionBackendMode | undefined;
+      let candidate: VisionModelCandidate | undefined;
+      let testFailure = "";
+      let step: WizardStep = "language";
+      const history: WizardStep[] = [];
 
-      const scope = await chooseScope(ctx, messages);
-      if (!scope) return;
-      const mode = await chooseStrategy(ctx, messages);
-      if (!mode) return;
+      const next = (nextStep: WizardStep) => {
+        history.push(step);
+        step = nextStep;
+      };
+      const back = (): boolean => {
+        const previous = history.pop();
+        if (!previous) return false;
+        step = previous;
+        return true;
+      };
 
-      const candidate = mode === "anonymous-only"
-        ? undefined
-        : await chooseModel(ctx, messages, dependencies);
-      if (mode !== "anonymous-only" && !candidate) return;
-      if (candidate && !(await testSelectedModel(candidate, ctx, messages, dependencies))) return;
+      while (true) {
+        const messages = getEyesSetupMessages(language);
 
-      const backend = candidate
-        ? { mode, model: { provider: candidate.model.provider, id: candidate.model.id } }
-        : { mode };
-      const config: EyesSetupConfig = { version: 1, language, backend };
-      const scopeLabel = scope === "project" ? messages.scopeProject : messages.scopeGlobal;
-      const strategyLabel = mode === "auto"
-        ? messages.strategyAuto
-        : mode === "pi-only"
-          ? messages.strategyPiOnly
-          : messages.strategyAnonymousOnly;
-      const selectedModel = candidate
-        ? `${candidate.model.provider}/${candidate.model.id}`
-        : messages.anonymousModel;
-      const confirmed = await ctx.ui.confirm(
-        messages.confirmTitle,
-        messages.confirmMessage(scopeLabel, strategyLabel, selectedModel),
-      );
-      if (!confirmed) return;
+        if (step === "language") {
+          const selected = await chooseLanguage(ctx, language);
+          if (!selected) return;
+          language = selected;
+          next("scope");
+          continue;
+        }
 
-      try {
-        await dependencies.saveConfig(scope, config, ctx);
-      } catch (error) {
-        ctx.ui.notify(messages.saveFailed(errorText(error)), "error");
-        throw error;
+        if (step === "scope") {
+          const selected = await chooseScope(ctx, messages);
+          if (selected.kind === "cancel") return;
+          if (selected.kind === "back") {
+            if (!back()) return;
+            continue;
+          }
+          scope = selected.value;
+          next("strategy");
+          continue;
+        }
+
+        if (step === "strategy") {
+          const selected = await chooseStrategy(ctx, messages);
+          if (selected.kind === "cancel") return;
+          if (selected.kind === "back") {
+            if (!back()) return;
+            continue;
+          }
+          mode = selected.value;
+          candidate = undefined;
+          next(mode === "anonymous-only" ? "review" : "model");
+          continue;
+        }
+
+        if (step === "model") {
+          const selected = await chooseModel(ctx, messages, dependencies);
+          if (selected.kind === "cancel") return;
+          if (selected.kind === "back") {
+            if (!back()) return;
+            continue;
+          }
+          candidate = selected.value;
+          next(dependencies.testModel ? "test" : "review");
+          continue;
+        }
+
+        if (step === "test") {
+          if (!candidate) {
+            if (!back()) return;
+            continue;
+          }
+          if (!isCandidateAvailable(candidate, ctx)) {
+            ctx.ui.notify(messages.modelUnavailable, "warning");
+            candidate = undefined;
+            if (!back()) return;
+            continue;
+          }
+          const label = `${candidate.model.provider}/${candidate.model.id}`;
+          const choice = await ctx.ui.select(
+            `${messages.testTitle}\n${messages.testQuestion(label)}`,
+            [messages.testNow, messages.testSkip, messages.back, messages.cancelSetup],
+          );
+          if (choice === messages.cancelSetup) return;
+          if (choice === undefined || choice === messages.back) {
+            if (!back()) return;
+            continue;
+          }
+          if (choice === messages.testSkip) {
+            next("review");
+            continue;
+          }
+          const result = await runSelectedModelTest(candidate, ctx, messages, dependencies);
+          if (result.ok) {
+            next("review");
+          } else {
+            testFailure = result.message || messages.modelUnavailable;
+            next("testFailed");
+          }
+          continue;
+        }
+
+        if (step === "testFailed") {
+          if (!candidate) {
+            if (!back()) return;
+            continue;
+          }
+          if (!isCandidateAvailable(candidate, ctx)) {
+            ctx.ui.notify(messages.modelUnavailable, "warning");
+            candidate = undefined;
+            while (history.at(-1) !== "strategy" && history.length > 0) history.pop();
+            step = "model";
+            continue;
+          }
+          const choice = await ctx.ui.select(
+            messages.testFailed(testFailure || messages.modelUnavailable),
+            [messages.testRetry, messages.testUseAnyway, messages.back, messages.cancelSetup],
+          );
+          if (choice === messages.cancelSetup) return;
+          if (choice === undefined || choice === messages.back) {
+            if (!back()) return;
+            continue;
+          }
+          if (choice === messages.testUseAnyway) {
+            next("review");
+            continue;
+          }
+          const result = await runSelectedModelTest(candidate, ctx, messages, dependencies);
+          if (result.ok) {
+            next("review");
+          } else {
+            testFailure = result.message || messages.modelUnavailable;
+          }
+          continue;
+        }
+
+        if (!scope || !mode) {
+          if (!back()) return;
+          continue;
+        }
+        if (candidate && !isCandidateAvailable(candidate, ctx)) {
+          ctx.ui.notify(messages.modelUnavailable, "warning");
+          candidate = undefined;
+          while (history.at(-1) !== "strategy" && history.length > 0) history.pop();
+          step = "model";
+          continue;
+        }
+        const backend = candidate
+          ? { mode, model: { provider: candidate.model.provider, id: candidate.model.id } }
+          : { mode };
+        const config: EyesSetupConfig = { version: 1, language, backend };
+        const scopeLabel = scope === "project" ? messages.scopeProject : messages.scopeGlobal;
+        const strategyLabel = mode === "auto"
+          ? messages.strategyAuto
+          : mode === "pi-only"
+            ? messages.strategyPiOnly
+            : messages.strategyAnonymousOnly;
+        const selectedModel = candidate
+          ? `${candidate.model.provider}/${candidate.model.id}`
+          : messages.anonymousModel;
+        const choice = await ctx.ui.select(
+          `${messages.confirmTitle}\n${messages.confirmMessage(scopeLabel, strategyLabel, selectedModel)}`,
+          [messages.saveConfiguration, messages.back, messages.cancelSetup],
+        );
+        if (choice === messages.cancelSetup) return;
+        if (choice === undefined || choice === messages.back) {
+          if (!back()) return;
+          continue;
+        }
+        if (choice !== messages.saveConfiguration) continue;
+        if (candidate && !isCandidateAvailable(candidate, ctx)) {
+          ctx.ui.notify(messages.modelUnavailable, "warning");
+          candidate = undefined;
+          while (history.at(-1) !== "strategy" && history.length > 0) history.pop();
+          step = "model";
+          continue;
+        }
+
+        try {
+          await dependencies.saveConfig(scope, config, ctx);
+        } catch (error) {
+          ctx.ui.notify(messages.saveFailed(errorText(error)), "error");
+          continue;
+        }
+        ctx.ui.notify(scope === "project" ? messages.savedProject : messages.savedGlobal, "info");
+        return;
       }
-      ctx.ui.notify(scope === "project" ? messages.savedProject : messages.savedGlobal, "info");
     },
   });
 }
