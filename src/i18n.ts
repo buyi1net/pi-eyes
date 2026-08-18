@@ -22,7 +22,8 @@ export interface EyesSetupMessages {
   emptyAvailable: string;
   modelStatusAuthenticated: string;
   modelStatusNoAuthRequired: string;
-  help: string;
+  helpNavigation: string;
+  helpActions: string;
   refreshRunning: string;
   refreshComplete: string;
   refreshUnavailable: string;
@@ -64,7 +65,8 @@ const ZH_CN: EyesSetupMessages = {
   emptyAvailable: "（没有其它可用模型）",
   modelStatusAuthenticated: "已认证",
   modelStatusNoAuthRequired: "无需认证",
-  help: "Tab/←→ 切换列表  ↑↓ 定位  Enter/Space 移动模型  M 路由  O 公共链  L 语言  Ctrl+R 刷新  Ctrl+T 测试  Ctrl+S 保存  Esc 退出",
+  helpNavigation: "Tab/←→ 切换列表   ↑↓ 定位   Enter/Space 移动模型",
+  helpActions: "M 路由   O 公共链   L 语言   Ctrl+R 刷新   Ctrl+T 测试   Ctrl+S 保存   Esc 退出",
   refreshRunning: "正在刷新 Pi 模型目录……",
   refreshComplete: "Pi 模型目录已刷新。",
   refreshUnavailable: "当前环境不支持刷新 Pi 模型目录。",
@@ -106,7 +108,8 @@ const EN: EyesSetupMessages = {
   emptyAvailable: "(No other model available)",
   modelStatusAuthenticated: "authenticated",
   modelStatusNoAuthRequired: "no authentication required",
-  help: "Tab/←→ panes  ↑↓ navigate  Enter/Space move  M route  O public chain  L language  Ctrl+R refresh  Ctrl+T test  Ctrl+S save  Esc exit",
+  helpNavigation: "Tab/←→ panes   ↑↓ navigate   Enter/Space move",
+  helpActions: "M route   O public chain   L language   Ctrl+R refresh   Ctrl+T test   Ctrl+S save   Esc exit",
   refreshRunning: "Refreshing the Pi model catalogue…",
   refreshComplete: "Pi model catalogue refreshed.",
   refreshUnavailable: "Model refresh is not available in this environment.",

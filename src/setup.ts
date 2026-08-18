@@ -70,6 +70,9 @@ export interface EyesSetupDependencies {
 type ModelPane = "selected" | "available";
 type BusyAction = "refresh" | "test" | "save";
 
+const MAX_CONTENT_WIDTH = 110;
+const DUAL_PANE_MIN_WIDTH = 96;
+
 function modelKey(model: Pick<Model<Api>, "provider" | "id">): string {
   return `${model.provider}\0${model.id}`;
 }
@@ -418,7 +421,8 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
         };
         const render = (width: number): string[] => {
           const renderWidth = Math.max(1, width);
-          const clip = (text: string) => truncateToWidth(text, renderWidth);
+          const contentWidth = Math.min(renderWidth, MAX_CONTENT_WIDTH);
+          const clip = (text: string) => truncateToWidth(text, contentWidth);
           const copy = messages();
           const selected = selectedCandidates();
           const available = availableCandidates();
@@ -431,33 +435,44 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
           if (projectOverrideActive) {
             lines.push(clip(theme.fg("warning", copy.projectOverrideWarning)));
           }
-          lines.push(
-            "",
-            clip(`${copy.languageLabel}: ${theme.fg("accent", languageLabel)}    ${copy.routeLabel}: ${theme.fg("accent", routeLabel(mode, copy))}    ${copy.ovhLabel}: ${theme.fg("accent", ovhLabel)}`),
-            "",
-          );
+          lines.push("");
+          if (contentWidth >= 72) {
+            lines.push(clip(`${copy.languageLabel}: ${theme.fg("accent", languageLabel)}    ${copy.routeLabel}: ${theme.fg("accent", routeLabel(mode, copy))}    ${copy.ovhLabel}: ${theme.fg("accent", ovhLabel)}`));
+          } else {
+            lines.push(
+              clip(`${copy.languageLabel}: ${theme.fg("accent", languageLabel)}`),
+              clip(`${copy.routeLabel}: ${theme.fg("accent", routeLabel(mode, copy))}`),
+              clip(`${copy.ovhLabel}: ${theme.fg("accent", ovhLabel)}`),
+            );
+          }
+          lines.push("");
           const selectedTitle = `${pane === "selected" ? ">" : " "} ${copy.selectedModels} (${selected.length})`;
           const availableTitle = `${pane === "available" ? ">" : " "} ${copy.availableModels} (${available.length})`;
-          const listLimit = width >= 72 ? 7 : 4;
-          const selectedLines = renderList(selected, selectedCursor, pane === "selected", copy.emptySelected, renderWidth, listLimit);
-          const availableLines = renderList(available, availableCursor, pane === "available", copy.emptyAvailable, renderWidth, listLimit);
-          if (width >= 72) {
-            const gap = 3;
-            const leftWidth = Math.floor((width - gap) / 2);
-            const rightWidth = Math.max(1, width - gap - leftWidth);
+          const dualPane = contentWidth >= DUAL_PANE_MIN_WIDTH;
+          const separatorWidth = dualPane ? 3 : 0;
+          const leftWidth = dualPane ? Math.floor((contentWidth - separatorWidth) / 2) : contentWidth;
+          const rightWidth = dualPane ? Math.max(1, contentWidth - separatorWidth - leftWidth) : contentWidth;
+          const listLimit = dualPane ? 7 : 4;
+          const selectedLines = renderList(selected, selectedCursor, pane === "selected", copy.emptySelected, leftWidth, listLimit);
+          const availableLines = renderList(available, availableCursor, pane === "available", copy.emptyAvailable, rightWidth, listLimit);
+          if (dualPane) {
+            const separator = theme.fg("dim", " │ ");
             lines.push(
-              `${theme.fg(pane === "selected" ? "accent" : "muted", padLine(selectedTitle, leftWidth))}${" ".repeat(gap)}${theme.fg(pane === "available" ? "accent" : "muted", padLine(availableTitle, rightWidth))}`,
+              `${theme.fg(pane === "selected" ? "accent" : "muted", padLine(selectedTitle, leftWidth))}${separator}${theme.fg(pane === "available" ? "accent" : "muted", padLine(availableTitle, rightWidth))}`,
             );
             const rows = Math.max(selectedLines.length, availableLines.length, 1);
             for (let index = 0; index < rows; index += 1) {
-              lines.push(`${padLine(selectedLines[index] || "", leftWidth)}${" ".repeat(gap)}${padLine(availableLines[index] || "", rightWidth)}`);
+              lines.push(`${padLine(selectedLines[index] || "", leftWidth)}${separator}${padLine(availableLines[index] || "", rightWidth)}`);
             }
           } else {
             lines.push(clip(theme.fg(pane === "selected" ? "accent" : "muted", selectedTitle)), ...selectedLines, "");
             lines.push(clip(theme.fg(pane === "available" ? "accent" : "muted", availableTitle)), ...availableLines);
           }
           lines.push("", status ? clip(theme.fg(busy ? "warning" : "muted", status)) : "");
-          lines.push(clip(theme.fg("dim", copy.help)));
+          lines.push(
+            clip(theme.fg("dim", copy.helpNavigation)),
+            clip(theme.fg("dim", copy.helpActions)),
+          );
           return lines;
         };
         const handleInput = (data: string) => {

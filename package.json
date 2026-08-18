@@ -1,6 +1,6 @@
 {
   "name": "pi-eyes",
-  "version": "0.3.1",
+  "version": "0.3.2",
   "description": "Give text-only models in pi the ability to see images (12 vision tools ported from dsh-vision-router ideas)",
   "type": "module",
   "pi": {
