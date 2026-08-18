@@ -5,9 +5,7 @@ export interface EyesSetupMessages {
   languageTitle: string;
   languageChinese: string;
   languageEnglish: string;
-  cancelSetupRoot: string;
   back: string;
-  cancelSetup: string;
   scopeTitle: string;
   scopeGlobal: string;
   scopeProject: string;
@@ -52,9 +50,7 @@ const ZH_CN: EyesSetupMessages = {
   languageTitle: "语言 / Language",
   languageChinese: "简体中文",
   languageEnglish: "English",
-  cancelSetupRoot: "取消配置 / Cancel setup",
   back: "← 返回上一步",
-  cancelSetup: "取消配置",
   scopeTitle: "配置保存位置",
   scopeGlobal: "全局（所有项目）",
   scopeProject: "当前项目",
@@ -64,7 +60,7 @@ const ZH_CN: EyesSetupMessages = {
   strategyAnonymousOnly: "仅使用匿名模型链",
   modelTitle: "选择 Pi 视觉模型",
   modelManual: "手动输入 provider/model",
-  modelManualTitle: "输入 Pi 模型（取消返回模型列表）",
+  modelManualTitle: "输入 Pi 模型",
   modelManualPlaceholder: "provider/model",
   modelInvalid: "没有在 Pi 模型目录中找到这个模型。",
   modelNotVisual: "该模型没有声明图片输入能力。",
@@ -100,9 +96,7 @@ const EN: EyesSetupMessages = {
   languageTitle: "Language / 语言",
   languageChinese: "简体中文",
   languageEnglish: "English",
-  cancelSetupRoot: "取消配置 / Cancel setup",
   back: "← Back",
-  cancelSetup: "Cancel setup",
   scopeTitle: "Save configuration to",
   scopeGlobal: "Global (all projects)",
   scopeProject: "Current project",
@@ -112,7 +106,7 @@ const EN: EyesSetupMessages = {
   strategyAnonymousOnly: "Anonymous model chain only",
   modelTitle: "Choose a Pi vision model",
   modelManual: "Enter provider/model manually",
-  modelManualTitle: "Enter a Pi model (cancel to return to the model list)",
+  modelManualTitle: "Enter a Pi model",
   modelManualPlaceholder: "provider/model",
   modelInvalid: "This model was not found in Pi's model catalogue.",
   modelNotVisual: "This model does not declare image input support.",

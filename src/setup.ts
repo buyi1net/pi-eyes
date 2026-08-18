@@ -95,16 +95,16 @@ async function chooseLanguage(
   const choice = await ctx.ui.select(messages.languageTitle, [
     messages.languageChinese,
     messages.languageEnglish,
-    messages.cancelSetupRoot,
   ]);
-  if (choice === undefined || choice === messages.cancelSetupRoot) return undefined;
-  return choice === messages.languageEnglish ? "en" : "zh-CN";
+  if (choice === messages.languageChinese) return "zh-CN";
+  if (choice === messages.languageEnglish) return "en";
+  return undefined;
 }
 
 type StepChoice<T> =
   | { kind: "value"; value: T }
   | { kind: "back" }
-  | { kind: "cancel" };
+  | { kind: "exit" };
 
 async function chooseScope(
   ctx: ExtensionCommandContext,
@@ -115,11 +115,12 @@ async function chooseScope(
   const choice = await ctx.ui.select(messages.scopeTitle, [
     ...options,
     messages.back,
-    messages.cancelSetup,
   ]);
-  if (choice === undefined || choice === messages.back) return { kind: "back" };
-  if (choice === messages.cancelSetup) return { kind: "cancel" };
-  return { kind: "value", value: choice === messages.scopeProject ? "project" : "global" };
+  if (choice === undefined) return { kind: "exit" };
+  if (choice === messages.back) return { kind: "back" };
+  if (choice === messages.scopeGlobal) return { kind: "value", value: "global" };
+  if (choice === messages.scopeProject && ctx.isProjectTrusted()) return { kind: "value", value: "project" };
+  return { kind: "exit" };
 }
 
 async function chooseStrategy(
@@ -131,13 +132,13 @@ async function chooseStrategy(
     messages.strategyPiOnly,
     messages.strategyAnonymousOnly,
     messages.back,
-    messages.cancelSetup,
   ]);
-  if (choice === undefined || choice === messages.back) return { kind: "back" };
-  if (choice === messages.cancelSetup) return { kind: "cancel" };
+  if (choice === undefined) return { kind: "exit" };
+  if (choice === messages.back) return { kind: "back" };
   if (choice === messages.strategyPiOnly) return { kind: "value", value: "pi-only" };
   if (choice === messages.strategyAnonymousOnly) return { kind: "value", value: "anonymous-only" };
-  return { kind: "value", value: "auto" };
+  if (choice === messages.strategyAuto) return { kind: "value", value: "auto" };
+  return { kind: "exit" };
 }
 
 function findManualModel(
@@ -176,11 +177,11 @@ async function chooseModel(
     const labels = candidates.map((candidate) => formatModelLabel(candidate, messages));
     const options = [...labels, messages.modelManual];
     if (dependencies.refreshModels) options.push(messages.refreshModels);
-    options.push(messages.back, messages.cancelSetup);
+    options.push(messages.back);
 
     const choice = await ctx.ui.select(messages.modelTitle, options);
-    if (choice === undefined || choice === messages.back) return { kind: "back" };
-    if (choice === messages.cancelSetup) return { kind: "cancel" };
+    if (choice === undefined) return { kind: "exit" };
+    if (choice === messages.back) return { kind: "back" };
 
     if (choice === messages.refreshModels && dependencies.refreshModels) {
       try {
@@ -195,7 +196,7 @@ async function chooseModel(
     let candidate: VisionModelCandidate | undefined;
     if (choice === messages.modelManual) {
       const raw = await ctx.ui.input(messages.modelManualTitle, messages.modelManualPlaceholder);
-      if (raw === undefined) continue;
+      if (raw === undefined) return { kind: "exit" };
       candidate = findManualModel(raw.trim(), ctx, messages);
       if (!candidate) continue;
     } else {
@@ -278,7 +279,7 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
 
         if (step === "scope") {
           const selected = await chooseScope(ctx, messages);
-          if (selected.kind === "cancel") return;
+          if (selected.kind === "exit") return;
           if (selected.kind === "back") {
             if (!back()) return;
             continue;
@@ -290,7 +291,7 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
 
         if (step === "strategy") {
           const selected = await chooseStrategy(ctx, messages);
-          if (selected.kind === "cancel") return;
+          if (selected.kind === "exit") return;
           if (selected.kind === "back") {
             if (!back()) return;
             continue;
@@ -303,7 +304,7 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
 
         if (step === "model") {
           const selected = await chooseModel(ctx, messages, dependencies);
-          if (selected.kind === "cancel") return;
+          if (selected.kind === "exit") return;
           if (selected.kind === "back") {
             if (!back()) return;
             continue;
@@ -327,10 +328,10 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
           const label = `${candidate.model.provider}/${candidate.model.id}`;
           const choice = await ctx.ui.select(
             `${messages.testTitle}\n${messages.testQuestion(label)}`,
-            [messages.testNow, messages.testSkip, messages.back, messages.cancelSetup],
+            [messages.testNow, messages.testSkip, messages.back],
           );
-          if (choice === messages.cancelSetup) return;
-          if (choice === undefined || choice === messages.back) {
+          if (choice === undefined) return;
+          if (choice === messages.back) {
             if (!back()) return;
             continue;
           }
@@ -338,6 +339,7 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
             next("review");
             continue;
           }
+          if (choice !== messages.testNow) return;
           const result = await runSelectedModelTest(candidate, ctx, messages, dependencies);
           if (result.ok) {
             next("review");
@@ -362,10 +364,10 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
           }
           const choice = await ctx.ui.select(
             messages.testFailed(testFailure || messages.modelUnavailable),
-            [messages.testRetry, messages.testUseAnyway, messages.back, messages.cancelSetup],
+            [messages.testRetry, messages.testUseAnyway, messages.back],
           );
-          if (choice === messages.cancelSetup) return;
-          if (choice === undefined || choice === messages.back) {
+          if (choice === undefined) return;
+          if (choice === messages.back) {
             if (!back()) return;
             continue;
           }
@@ -373,6 +375,7 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
             next("review");
             continue;
           }
+          if (choice !== messages.testRetry) return;
           const result = await runSelectedModelTest(candidate, ctx, messages, dependencies);
           if (result.ok) {
             next("review");
@@ -408,14 +411,14 @@ export function registerEyesSetup(pi: ExtensionAPI, dependencies: EyesSetupDepen
           : messages.anonymousModel;
         const choice = await ctx.ui.select(
           `${messages.confirmTitle}\n${messages.confirmMessage(scopeLabel, strategyLabel, selectedModel)}`,
-          [messages.saveConfiguration, messages.back, messages.cancelSetup],
+          [messages.saveConfiguration, messages.back],
         );
-        if (choice === messages.cancelSetup) return;
-        if (choice === undefined || choice === messages.back) {
+        if (choice === undefined) return;
+        if (choice === messages.back) {
           if (!back()) return;
           continue;
         }
-        if (choice !== messages.saveConfiguration) continue;
+        if (choice !== messages.saveConfiguration) return;
         if (candidate && !isCandidateAvailable(candidate, ctx)) {
           ctx.ui.notify(messages.modelUnavailable, "warning");
           candidate = undefined;
