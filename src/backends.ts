@@ -2,7 +2,7 @@
 // 调用形态移植自 dsh-vision-router/index.js 的 callOpenAICompatible / toOpenAIContent(MIT)。
 
 export interface VisionBackend {
-  /** 展示与熔断用的稳定标识,如 "zai-coding-cn/glm-4.6v" */
+  /** 展示与熔断用的稳定 provider/model 标识。 */
   id: string;
   baseURL: string;
   model: string;

@@ -1,7 +1,7 @@
 ﻿# pi-vision-tools 像素管线:解码/编码/裁剪/标注。
-# 设计:JS 层负责算法(diff/量化/洪水填充),本脚本只做 GDI+ 能干的
-# 解码(bytes->RGBA)、编码(RGBA->PNG)、裁剪与画框,避免在 JS 里引入 sharp。
-# 注意:GDI+ 不支持 webp,webp 由 JS 层先经 magick 转 png 再进这里。
+# 设计:sharp 是跨平台主后端;本脚本仅作为 Windows 备用路径,负责 GDI+ 能完成的
+# 解码(bytes->RGBA)、编码(RGBA->PNG)、裁剪与画框。
+# 注意:GDI+ 不支持 WebP;WebP 只由 sharp 主后端处理。
 # 编码:必须保持 UTF-8 带 BOM;无 BOM 时 Windows PowerShell 5.1 按 GBK 解码中文注释,会吞换行导致语法解析失败。
 
 param(

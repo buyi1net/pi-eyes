@@ -89,7 +89,10 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
         `ORIGINAL image pixels (0 <= x1 < x2 <= ${width}, 0 <= y1 < y2 <= ${height}). ` +
         `Output only the JSON object.`;
 
-      let answer = await chain.ask(ctx.modelRegistry, [part], instruction, { signal, deadlineAt });
+      const currentModel = ctx.model
+        ? { provider: ctx.model.provider, modelId: ctx.model.id }
+        : undefined;
+      let answer = await chain.ask(ctx.modelRegistry, [part], instruction, { signal, deadlineAt, currentModel });
       if (!answer.ok) return { content: [{ type: "text", text: answer.json }], details: { backend: "none" } };
       let box = boxFromObject(extractJson(answer.text));
       if (box === undefined) {
@@ -105,7 +108,7 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
           `Your previous box ${JSON.stringify(clamped)} was a degenerate sliver, not the target. ` +
             `Return ONE JSON object with the FULL tight bounding box of the target in ORIGINAL ` +
             `image pixels (0 <= x1 < x2 <= ${width}, 0 <= y1 < y2 <= ${height}). Output only the JSON object.`,
-          { signal, deadlineAt },
+          { signal, deadlineAt, currentModel },
         );
         if (!answer.ok) return { content: [{ type: "text", text: answer.json }], details: { backend: "none" } };
         box = boxFromObject(extractJson(answer.text));
@@ -165,7 +168,10 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
       const part = await imagePartFromPath(path, { signal });
 
       const instruction = visionDetectInstruction(target, width, height);
-      let answer = await chain.ask(ctx.modelRegistry, [part], instruction, { signal, deadlineAt });
+      const currentModel = ctx.model
+        ? { provider: ctx.model.provider, modelId: ctx.model.id }
+        : undefined;
+      let answer = await chain.ask(ctx.modelRegistry, [part], instruction, { signal, deadlineAt, currentModel });
       if (!answer.ok) return { content: [{ type: "text", text: answer.json }], details: { backend: "none" } };
       let parsed = extractJson(answer.text);
       if (parsed === undefined) {
@@ -173,7 +179,7 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
           ctx.modelRegistry,
           [part],
           instruction + "\nYour previous answer was not valid JSON. Respond with ONLY the JSON object, no prose, no fences.",
-          { signal, deadlineAt },
+          { signal, deadlineAt, currentModel },
         );
         if (!retry.ok) return { content: [{ type: "text", text: retry.json }], details: { backend: "none" } };
         answer = retry;

@@ -2,10 +2,10 @@ import { randomUUID } from "node:crypto";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { basename, dirname, join } from "node:path";
 
-export const PI_EYES_CONFIG_VERSION = 1 as const;
+export const PI_EYES_CONFIG_VERSION = 2 as const;
 
 export type PiEyesLanguage = "auto" | "zh-CN" | "en";
-export type AnonymousChainPosition = "fallback" | "primary";
+export type VisionRouteMode = "automatic" | "fixed" | "public-only";
 
 export interface VisionModelSelection {
   provider: string;
@@ -19,10 +19,14 @@ export interface PiEyesConfigLayer {
     [key: string]: unknown;
   };
   backend?: {
-    selectedModel?: VisionModelSelection | null;
-    anonymousChain?: {
+    route?: {
+      mode?: VisionRouteMode;
+      allowedModels?: VisionModelSelection[] | null;
+      fixedModel?: VisionModelSelection;
+      [key: string]: unknown;
+    };
+    ovhPublicChain?: {
       enabled?: boolean;
-      position?: AnonymousChainPosition;
       [key: string]: unknown;
     };
     [key: string]: unknown;
@@ -34,8 +38,12 @@ export interface ResolvedPiEyesConfig {
   schemaVersion: typeof PI_EYES_CONFIG_VERSION;
   ui: { language: PiEyesLanguage };
   backend: {
-    selectedModel: VisionModelSelection | null;
-    anonymousChain: { enabled: boolean; position: AnonymousChainPosition };
+    route: {
+      mode: VisionRouteMode;
+      allowedModels: VisionModelSelection[] | null;
+      fixedModel?: VisionModelSelection;
+    };
+    ovhPublicChain: { enabled: boolean };
   };
 }
 
@@ -59,8 +67,8 @@ export const DEFAULT_PI_EYES_CONFIG: ResolvedPiEyesConfig = Object.freeze({
   schemaVersion: PI_EYES_CONFIG_VERSION,
   ui: Object.freeze({ language: "auto" }),
   backend: Object.freeze({
-    selectedModel: Object.freeze({ provider: "zai-coding-cn", model: "glm-4.6v" }),
-    anonymousChain: Object.freeze({ enabled: true, position: "fallback" }),
+    route: Object.freeze({ mode: "automatic", allowedModels: null }),
+    ovhPublicChain: Object.freeze({ enabled: true }),
   }),
 });
 
@@ -85,39 +93,99 @@ function requireNonEmptyString(value: unknown, field: string): string {
   return value;
 }
 
-/** 校验已知 v1 字段，同时保留未知字段，避免旧版配置器覆盖新版字段。 */
+function parseModelSelection(value: unknown, field: string): VisionModelSelection {
+  const selection = requireRecord(value, field);
+  return {
+    provider: requireNonEmptyString(selection.provider, `${field}.provider`),
+    model: requireNonEmptyString(selection.model, `${field}.model`),
+  };
+}
+
+function validateLanguage(root: Record<string, unknown>): void {
+  if (root.ui === undefined) return;
+  const ui = requireRecord(root.ui, "ui");
+  if (ui.language !== undefined && ui.language !== "auto" && ui.language !== "zh-CN" && ui.language !== "en") {
+    throw new Error('ui.language 必须是 "auto"、"zh-CN" 或 "en"');
+  }
+}
+
+/** 把 v1 层转换成 v2 层；只返回内存结果，不写回配置文件。 */
+function migrateV1Layer(root: Record<string, unknown>): PiEyesConfigLayer {
+  validateLanguage(root);
+  const migrated: Record<string, unknown> = { ...root, schemaVersion: PI_EYES_CONFIG_VERSION };
+  if (root.backend === undefined) return migrated as PiEyesConfigLayer;
+
+  const backend = requireRecord(root.backend, "backend");
+  const nextBackend: Record<string, unknown> = { ...backend };
+  delete nextBackend.selectedModel;
+  delete nextBackend.anonymousChain;
+
+  if (backend.selectedModel !== undefined) {
+    nextBackend.route = backend.selectedModel === null
+      ? { mode: "public-only" }
+      : { mode: "fixed", fixedModel: parseModelSelection(backend.selectedModel, "backend.selectedModel") };
+  }
+  if (backend.anonymousChain !== undefined) {
+    const anonymous = requireRecord(backend.anonymousChain, "backend.anonymousChain");
+    if (anonymous.enabled !== undefined && typeof anonymous.enabled !== "boolean") {
+      throw new Error("backend.anonymousChain.enabled 必须是布尔值");
+    }
+    if (anonymous.position !== undefined && anonymous.position !== "fallback" && anonymous.position !== "primary") {
+      throw new Error('backend.anonymousChain.position 必须是 "fallback" 或 "primary"');
+    }
+    if (anonymous.enabled !== undefined) nextBackend.ovhPublicChain = { enabled: anonymous.enabled };
+    // v2 不再提供“公共链优先、Pi 模型兜底”的混合顺序。旧手写配置若明确
+    // 选择 primary，迁为 public-only 才能保留其首选数据流，而不是静默反转为 Pi 优先。
+    if (anonymous.position === "primary" && anonymous.enabled !== false) {
+      nextBackend.route = { mode: "public-only" };
+      nextBackend.ovhPublicChain = { enabled: true };
+    }
+  }
+  migrated.backend = nextBackend;
+  return migrated as PiEyesConfigLayer;
+}
+
+/** 校验 v2 已知字段并保留未知字段；v1 只在内存中迁移。 */
 export function parsePiEyesConfigLayer(value: unknown): PiEyesConfigLayer {
   const root = requireRecord(value, "config");
+  if (root.schemaVersion === 1) return migrateV1Layer(root);
   if (root.schemaVersion !== PI_EYES_CONFIG_VERSION) {
     throw new Error(`不支持 schemaVersion: ${String(root.schemaVersion)}`);
   }
 
-  if (root.ui !== undefined) {
-    const ui = requireRecord(root.ui, "ui");
-    if (ui.language !== undefined && ui.language !== "auto" && ui.language !== "zh-CN" && ui.language !== "en") {
-      throw new Error('ui.language 必须是 "auto"、"zh-CN" 或 "en"');
-    }
-  }
-
+  validateLanguage(root);
   if (root.backend !== undefined) {
     const backend = requireRecord(root.backend, "backend");
-    if (backend.selectedModel !== undefined && backend.selectedModel !== null) {
-      const selected = requireRecord(backend.selectedModel, "backend.selectedModel");
-      requireNonEmptyString(selected.provider, "backend.selectedModel.provider");
-      requireNonEmptyString(selected.model, "backend.selectedModel.model");
-    }
-    if (backend.anonymousChain !== undefined) {
-      const anonymous = requireRecord(backend.anonymousChain, "backend.anonymousChain");
-      if (anonymous.enabled !== undefined && typeof anonymous.enabled !== "boolean") {
-        throw new Error("backend.anonymousChain.enabled 必须是布尔值");
+    if (backend.route !== undefined) {
+      const route = requireRecord(backend.route, "backend.route");
+      if (
+        route.mode !== undefined &&
+        route.mode !== "automatic" &&
+        route.mode !== "fixed" &&
+        route.mode !== "public-only"
+      ) {
+        throw new Error('backend.route.mode 必须是 "automatic"、"fixed" 或 "public-only"');
       }
-      if (anonymous.position !== undefined && anonymous.position !== "fallback" && anonymous.position !== "primary") {
-        throw new Error('backend.anonymousChain.position 必须是 "fallback" 或 "primary"');
+      if (route.allowedModels !== undefined && route.allowedModels !== null) {
+        if (!Array.isArray(route.allowedModels)) throw new Error("backend.route.allowedModels 必须是数组或 null");
+        route.allowedModels.forEach((entry, index) => {
+          parseModelSelection(entry, `backend.route.allowedModels[${index}]`);
+        });
+      }
+      if (route.fixedModel !== undefined) parseModelSelection(route.fixedModel, "backend.route.fixedModel");
+    }
+    if (backend.ovhPublicChain !== undefined) {
+      const ovh = requireRecord(backend.ovhPublicChain, "backend.ovhPublicChain");
+      if (ovh.enabled !== undefined && typeof ovh.enabled !== "boolean") {
+        throw new Error("backend.ovhPublicChain.enabled 必须是布尔值");
       }
     }
   }
-
   return root as PiEyesConfigLayer;
+}
+
+function cloneModels(models: VisionModelSelection[] | null): VisionModelSelection[] | null {
+  return models === null ? null : models.map((model) => ({ ...model }));
 }
 
 function cloneResolved(config: ResolvedPiEyesConfig): ResolvedPiEyesConfig {
@@ -125,19 +193,30 @@ function cloneResolved(config: ResolvedPiEyesConfig): ResolvedPiEyesConfig {
     schemaVersion: PI_EYES_CONFIG_VERSION,
     ui: { language: config.ui.language },
     backend: {
-      selectedModel: config.backend.selectedModel === null ? null : { ...config.backend.selectedModel },
-      anonymousChain: { ...config.backend.anonymousChain },
+      route: {
+        mode: config.backend.route.mode,
+        allowedModels: cloneModels(config.backend.route.allowedModels),
+        ...(config.backend.route.fixedModel ? { fixedModel: { ...config.backend.route.fixedModel } } : {}),
+      },
+      ovhPublicChain: { ...config.backend.ovhPublicChain },
     },
   };
 }
 
 function assertHasBackend(config: ResolvedPiEyesConfig): void {
-  if (config.backend.selectedModel === null && !config.backend.anonymousChain.enabled) {
-    throw new Error("至少必须启用一个视觉后端");
+  const route = config.backend.route;
+  if (route.mode === "fixed" && !route.fixedModel) {
+    throw new Error("fixed 路由必须指定 backend.route.fixedModel");
+  }
+  if (route.mode === "public-only" && !config.backend.ovhPublicChain.enabled) {
+    throw new Error("public-only 路由必须启用 OVH 公共链");
+  }
+  if (route.mode === "automatic" && route.allowedModels?.length === 0 && !config.backend.ovhPublicChain.enabled) {
+    throw new Error("自动候选为空时必须启用 OVH 公共链");
   }
 }
 
-/** 从低优先级向高优先级合并；null 表示显式清除 selectedModel。 */
+/** 从低优先级向高优先级逐字段合并。 */
 export function resolvePiEyesConfig(
   layers: readonly PiEyesConfigLayer[],
   base: ResolvedPiEyesConfig = DEFAULT_PI_EYES_CONFIG,
@@ -146,15 +225,15 @@ export function resolvePiEyesConfig(
   for (const untrustedLayer of layers) {
     const layer = parsePiEyesConfigLayer(untrustedLayer);
     if (layer.ui?.language !== undefined) result.ui.language = layer.ui.language;
-    if (layer.backend?.selectedModel !== undefined) {
-      result.backend.selectedModel =
-        layer.backend.selectedModel === null ? null : { ...layer.backend.selectedModel };
+    if (layer.backend?.route?.mode !== undefined) result.backend.route.mode = layer.backend.route.mode;
+    if (layer.backend?.route?.allowedModels !== undefined) {
+      result.backend.route.allowedModels = cloneModels(layer.backend.route.allowedModels);
     }
-    if (layer.backend?.anonymousChain?.enabled !== undefined) {
-      result.backend.anonymousChain.enabled = layer.backend.anonymousChain.enabled;
+    if (layer.backend?.route?.fixedModel !== undefined) {
+      result.backend.route.fixedModel = { ...layer.backend.route.fixedModel };
     }
-    if (layer.backend?.anonymousChain?.position !== undefined) {
-      result.backend.anonymousChain.position = layer.backend.anonymousChain.position;
+    if (layer.backend?.ovhPublicChain?.enabled !== undefined) {
+      result.backend.ovhPublicChain.enabled = layer.backend.ovhPublicChain.enabled;
     }
   }
   assertHasBackend(result);
@@ -265,8 +344,8 @@ async function readValidRaw(path: string): Promise<{ raw: Record<string, unknown
       const text = await readFile(candidate, "utf8");
       const raw = requireRecord(JSON.parse(text), "config");
       rejectFutureVersion(raw, candidate);
-      parsePiEyesConfigLayer(raw);
-      return { raw, backupCurrent: candidate === path };
+      const parsed = parsePiEyesConfigLayer(raw);
+      return { raw: parsed as Record<string, unknown>, backupCurrent: candidate === path };
     } catch (error) {
       if (error instanceof FutureConfigVersionError) throw error;
       // 主文件损坏时保留可用备份，不能在下次保存时用损坏内容覆盖它。

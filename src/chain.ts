@@ -10,6 +10,8 @@ import {
 } from "./backends";
 import {
   callPiVisionModel,
+  piVisionModelKey,
+  selectAutomaticPiVisionModel,
   type PiVisionModelRegistry,
   type PiVisionModelSelection,
 } from "./pi-model-backend";
@@ -29,39 +31,78 @@ export interface VisionAnswerFail {
 export type VisionAnswer = VisionAnswerOk | VisionAnswerFail;
 
 export interface VisionRoutingConfig {
-  selectedModel: PiVisionModelSelection | null;
-  anonymousChain: {
-    enabled: boolean;
-    position: "fallback" | "primary";
+  route: {
+    mode: "automatic" | "fixed" | "public-only";
+    allowedModels: PiVisionModelSelection[] | null;
+    fixedModel?: PiVisionModelSelection;
   };
+  ovhPublicChain: { enabled: boolean };
 }
 
 const DEFAULT_ROUTING: VisionRoutingConfig = {
-  selectedModel: { provider: "zai-coding-cn", modelId: "glm-4.6v" },
-  anonymousChain: { enabled: true, position: "fallback" },
+  route: { mode: "automatic", allowedModels: null },
+  ovhPublicChain: { enabled: true },
 };
 
 type BackendTarget =
   | { kind: "pi"; id: string; selection: PiVisionModelSelection }
-  | { kind: "anonymous"; id: string; backend: VisionBackend };
+  | { kind: "public"; id: string; backend: VisionBackend };
 
 export class VisionChain {
   readonly circuit = new VisionCircuit();
   readonly turnMemory = new TurnMemory();
   private turnCount = 0;
   private routing: VisionRoutingConfig = DEFAULT_ROUTING;
+  private stickyAutomaticModel?: PiVisionModelSelection;
+  private readonly failedAutomaticModels = new Set<string>();
 
   setRouting(config: VisionRoutingConfig): void {
+    if (config.route.mode === "fixed" && !config.route.fixedModel) {
+      throw new Error("fixed 路由必须指定 fixedModel");
+    }
+    if (config.route.mode === "public-only" && !config.ovhPublicChain.enabled) {
+      throw new Error("public-only 路由必须启用 OVH 公共链");
+    }
     this.routing = {
-      selectedModel: config.selectedModel ? { ...config.selectedModel } : null,
-      anonymousChain: { ...config.anonymousChain },
+      route: {
+        mode: config.route.mode,
+        allowedModels: config.route.allowedModels?.map((model) => ({ ...model })) ?? null,
+        ...(config.route.fixedModel ? { fixedModel: { ...config.route.fixedModel } } : {}),
+      },
+      ovhPublicChain: { ...config.ovhPublicChain },
     };
+    this.stickyAutomaticModel = undefined;
+    this.failedAutomaticModels.clear();
   }
 
   /** 一次 agent run 记一轮:清上一轮的失败短路与无效请求熔断。 */
   beginTurn(): void {
     this.turnCount += 1;
     this.turnMemory.newTurn(this.turnCount);
+  }
+
+  private selectPiTarget(
+    registry: PiVisionModelRegistry,
+    currentModel?: PiVisionModelSelection,
+  ): PiVisionModelSelection | undefined {
+    if (this.routing.route.mode === "fixed") return this.routing.route.fixedModel;
+    if (this.routing.route.mode === "public-only") return undefined;
+
+    if (this.stickyAutomaticModel) {
+      const availableSticky = selectAutomaticPiVisionModel(registry, {
+        allowedModels: [this.stickyAutomaticModel],
+        excludedModels: this.failedAutomaticModels,
+      });
+      if (availableSticky) return availableSticky;
+      this.stickyAutomaticModel = undefined;
+    }
+    const selected = selectAutomaticPiVisionModel(registry, {
+      currentModel,
+      allowedModels: this.routing.route.allowedModels,
+      excludedModels: this.failedAutomaticModels,
+    });
+    this.stickyAutomaticModel = selected;
+    return selected;
   }
 
   /**
@@ -72,28 +113,29 @@ export class VisionChain {
     registry: PiVisionModelRegistry,
     images: ImagePart[],
     prompt: string,
-    options: { signal?: AbortSignal; deadlineAt: number; perCallMs?: number },
+    options: {
+      signal?: AbortSignal;
+      deadlineAt: number;
+      perCallMs?: number;
+      currentModel?: PiVisionModelSelection;
+    },
   ): Promise<VisionAnswer> {
+    options.signal?.throwIfAborted();
     if (this.turnMemory.allFailed) {
       return { ok: false, json: buildFailureJson(["OTHER"], this.turnMemory.attempts) };
     }
+
     const targets: BackendTarget[] = [];
-    const piTarget = this.routing.selectedModel
-      ? {
-          kind: "pi" as const,
-          id: `${this.routing.selectedModel.provider}/${this.routing.selectedModel.modelId}`,
-          selection: this.routing.selectedModel,
-        }
-      : undefined;
-    const anonymousTargets: BackendTarget[] = this.routing.anonymousChain.enabled
-      ? OVH_CHAIN.map((backend) => ({ kind: "anonymous" as const, id: backend.id, backend }))
-      : [];
-    if (this.routing.anonymousChain.position === "primary") {
-      targets.push(...anonymousTargets);
-      if (piTarget) targets.push(piTarget);
-    } else {
-      if (piTarget) targets.push(piTarget);
-      targets.push(...anonymousTargets);
+    const piSelection = this.selectPiTarget(registry, options.currentModel);
+    if (piSelection) {
+      targets.push({
+        kind: "pi",
+        id: `${piSelection.provider}/${piSelection.modelId}`,
+        selection: piSelection,
+      });
+    }
+    if (this.routing.ovhPublicChain.enabled) {
+      targets.push(...OVH_CHAIN.map((backend) => ({ kind: "public" as const, id: backend.id, backend })));
     }
 
     const attempted: string[] = [];
@@ -111,7 +153,7 @@ export class VisionChain {
         continue;
       }
       if (options.signal?.aborted) {
-        return { ok: false, json: buildFailureJson(["OTHER"], [...attempted, "cancelled"]) };
+        options.signal.throwIfAborted();
       }
       const perCall = Math.min(options.perCallMs ?? 60_000, remaining);
       const callSignal = options.signal
@@ -127,20 +169,32 @@ export class VisionChain {
         this.circuit.clear(target.id);
         return { ok: true, text, backend: target.id };
       } catch (error) {
+        // 用户取消必须立即终止整个链，不能把同一图片继续发给公共兜底。
+        if (options.signal?.aborted) options.signal.throwIfAborted();
         const failure = classifyFailure({
           status: error instanceof VisionHttpError ? error.status : undefined,
           message: error instanceof Error ? error.message : String(error),
           retryAfterMs: error instanceof VisionHttpError ? error.retryAfterMs : undefined,
         });
         this.circuit.record(target.id, failure, this.turnCount);
+        if (
+          target.kind === "pi" &&
+          this.routing.route.mode === "automatic" &&
+          failure.kind !== "INVALID_REQUEST"
+        ) {
+          this.failedAutomaticModels.add(piVisionModelKey(target.selection.provider, target.selection.modelId));
+          this.stickyAutomaticModel = undefined;
+        }
         this.turnMemory.recordAttempt(`${target.id}: ${failure.kind}`);
         attempted.push(`${target.id}: ${failure.kind}`);
         failureKinds.push(failure.kind);
       }
     }
-    // 400/413/422 往往是本次参数或负载问题；允许模型修正路径、图片数量或尺寸后重试。
-    // 只有环境性失败才短路本轮后续网络调用。
-    if (!failureKinds.includes("INVALID_REQUEST")) this.turnMemory.markAllFailed();
+    // 自动模式每个请求只试一个 Pi 模型；该候选失败后，下次调用可换下一个。
+    const automaticCanTryAnotherModel =
+      this.routing.route.mode === "automatic" && targets.some((target) => target.kind === "pi");
+    // 400/413/422 往往是本次参数或负载问题，允许调用方修正后重试。
+    if (!failureKinds.includes("INVALID_REQUEST") && !automaticCanTryAnotherModel) this.turnMemory.markAllFailed();
     return { ok: false, json: buildFailureJson(failureKinds.length > 0 ? failureKinds : ["OTHER"], attempted) };
   }
 }

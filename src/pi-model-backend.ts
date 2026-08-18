@@ -28,6 +28,12 @@ export interface PiVisionCallOptions {
   systemPrompt?: string;
 }
 
+export interface AutomaticPiVisionModelOptions {
+  currentModel?: PiVisionModelSelection;
+  allowedModels?: readonly PiVisionModelSelection[] | null;
+  excludedModels?: ReadonlySet<string>;
+}
+
 export interface PiVisionProbeResult {
   passed: boolean;
   matched: number;
@@ -41,13 +47,13 @@ export type PiVisionModelRegistry = Pick<
   "getAll" | "getAvailable" | "find" | "getProviderAuthStatus" | "complete"
 >;
 
-function modelKey(provider: string, modelId: string): string {
+export function piVisionModelKey(provider: string, modelId: string): string {
   return `${provider}\0${modelId}`;
 }
 
 /** 列出全部声明支持图片的模型，并分别保留认证与当前可用状态。 */
 export function discoverPiVisionModels(registry: PiVisionModelRegistry): PiVisionModelCandidate[] {
-  const available = new Set(registry.getAvailable().map((model) => modelKey(model.provider, model.id)));
+  const available = new Set(registry.getAvailable().map((model) => piVisionModelKey(model.provider, model.id)));
   return registry.getAll()
     .filter((model) => model.input.includes("image"))
     .map((model) => {
@@ -57,7 +63,7 @@ export function discoverPiVisionModels(registry: PiVisionModelRegistry): PiVisio
         modelId: model.id,
         name: model.name,
         api: model.api,
-        available: available.has(modelKey(model.provider, model.id)),
+        available: available.has(piVisionModelKey(model.provider, model.id)),
         auth: {
           configured: auth.configured,
           ...(auth.source ? { source: auth.source } : {}),
@@ -65,6 +71,47 @@ export function discoverPiVisionModels(registry: PiVisionModelRegistry): PiVisio
         },
       };
     });
+}
+
+function compareText(left: string, right: string): number {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
+
+/** 从 Pi 当前可用的图片模型中按稳定规则选择一个，不发起模型调用。 */
+export function selectAutomaticPiVisionModel(
+  registry: PiVisionModelRegistry,
+  options: AutomaticPiVisionModelOptions = {},
+): PiVisionModelSelection | undefined {
+  const allowed = options.allowedModels === null || options.allowedModels === undefined
+    ? undefined
+    : new Set(options.allowedModels.map((model) => piVisionModelKey(model.provider, model.modelId)));
+  const seen = new Set<string>();
+  const candidates = registry.getAvailable()
+    .filter((model) => model.input.includes("image"))
+    .filter((model) => {
+      const key = piVisionModelKey(model.provider, model.id);
+      if (seen.has(key) || options.excludedModels?.has(key) || (allowed && !allowed.has(key))) return false;
+      seen.add(key);
+      return true;
+    })
+    .map((model) => ({ provider: model.provider, modelId: model.id }));
+
+  const currentKey = options.currentModel
+    ? piVisionModelKey(options.currentModel.provider, options.currentModel.modelId)
+    : undefined;
+  candidates.sort((left, right) => {
+    const leftKey = piVisionModelKey(left.provider, left.modelId);
+    const rightKey = piVisionModelKey(right.provider, right.modelId);
+    if (currentKey) {
+      if (leftKey === currentKey && rightKey !== currentKey) return -1;
+      if (rightKey === currentKey && leftKey !== currentKey) return 1;
+      const leftSameProvider = left.provider === options.currentModel!.provider;
+      const rightSameProvider = right.provider === options.currentModel!.provider;
+      if (leftSameProvider !== rightSameProvider) return leftSameProvider ? -1 : 1;
+    }
+    return compareText(`${left.provider}/${left.modelId}`, `${right.provider}/${right.modelId}`);
+  });
+  return candidates[0];
 }
 
 /** 只按 provider 与 modelId 联合键查找，不用显示名或模糊匹配。 */

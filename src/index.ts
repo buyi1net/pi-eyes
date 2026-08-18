@@ -69,35 +69,31 @@ function setupLanguage(config: ResolvedPiEyesConfig): "zh-CN" | "en" {
 }
 
 function toSetupConfig(config: ResolvedPiEyesConfig): EyesSetupConfig {
-  const selected = config.backend.selectedModel;
-  const mode = selected === null
-    ? "anonymous-only"
-    : config.backend.anonymousChain.enabled
-      ? "auto"
-      : "pi-only";
   return {
-    version: 1,
+    schemaVersion: 2,
     language: setupLanguage(config),
     backend: {
-      mode,
-      ...(selected ? { model: { provider: selected.provider, id: selected.model } } : {}),
+      route: {
+        mode: config.backend.route.mode,
+        allowedModels: config.backend.route.allowedModels?.map((model) => ({ ...model })) ?? null,
+        ...(config.backend.route.fixedModel ? { fixedModel: { ...config.backend.route.fixedModel } } : {}),
+      },
+      ovhPublicChain: { ...config.backend.ovhPublicChain },
     },
   };
 }
 
 function setupUpdate(config: EyesSetupConfig): Record<string, unknown> {
-  const selectedModel = config.backend.mode === "anonymous-only"
-    ? null
-    : { provider: config.backend.model!.provider, model: config.backend.model!.id };
   return {
-    schemaVersion: 1,
+    schemaVersion: 2,
     ui: { language: config.language },
     backend: {
-      selectedModel,
-      anonymousChain: {
-        enabled: config.backend.mode !== "pi-only",
-        position: config.backend.mode === "anonymous-only" ? "primary" : "fallback",
+      route: {
+        mode: config.backend.route.mode,
+        allowedModels: config.backend.route.allowedModels?.map((model) => ({ ...model })) ?? null,
+        ...(config.backend.route.fixedModel ? { fixedModel: { ...config.backend.route.fixedModel } } : {}),
       },
+      ovhPublicChain: { ...config.backend.ovhPublicChain },
     },
   };
 }
@@ -113,13 +109,22 @@ export default function (pi: ExtensionAPI) {
     });
     activeConfig = loaded.config;
     chain.setRouting({
-      selectedModel: activeConfig.backend.selectedModel
-        ? {
-            provider: activeConfig.backend.selectedModel.provider,
-            modelId: activeConfig.backend.selectedModel.model,
-          }
-        : null,
-      anonymousChain: activeConfig.backend.anonymousChain,
+      route: {
+        mode: activeConfig.backend.route.mode,
+        allowedModels: activeConfig.backend.route.allowedModels?.map((model) => ({
+          provider: model.provider,
+          modelId: model.model,
+        })) ?? null,
+        ...(activeConfig.backend.route.fixedModel
+          ? {
+              fixedModel: {
+                provider: activeConfig.backend.route.fixedModel.provider,
+                modelId: activeConfig.backend.route.fixedModel.model,
+              },
+            }
+          : {}),
+      },
+      ovhPublicChain: { ...activeConfig.backend.ovhPublicChain },
     });
     if (showWarnings && ctx.hasUI) {
       for (const warning of loaded.warnings) ctx.ui.notify(warning, "warning");
@@ -257,7 +262,10 @@ export default function (pi: ExtensionAPI) {
 
       const prompt = visionDescribePrompt(params.question, params.json === true);
       const deadlineAt = Date.now() + TASK_DEADLINE_MS;
-      const answer = await chain.ask(ctx.modelRegistry, images, prompt, { signal, deadlineAt });
+      const currentModel = ctx.model
+        ? { provider: ctx.model.provider, modelId: ctx.model.id }
+        : undefined;
+      const answer = await chain.ask(ctx.modelRegistry, images, prompt, { signal, deadlineAt, currentModel });
       if (!answer.ok) {
         return { content: [{ type: "text", text: answer.json }], details: { backend: "none", attempts: answer.json } };
       }
@@ -279,7 +287,7 @@ export default function (pi: ExtensionAPI) {
               ctx.modelRegistry,
               images,
               prompt + "\n\nThat output did not match the required {summary,layout,entities,text} schema. Respond with ONLY a conforming JSON object now.",
-              { signal, deadlineAt },
+              { signal, deadlineAt, currentModel },
             );
             if (!retry.ok) return { content: [{ type: "text", text: retry.json }], details: { backend: "none" } };
             text = retry.text;

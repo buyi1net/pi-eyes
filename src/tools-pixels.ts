@@ -453,7 +453,11 @@ export function registerPixelTools(pi: ExtensionAPI, chain: VisionChain): void {
         ctx.modelRegistry,
         [part],
         "请原样转述图中的所有文字,保持阅读顺序(从上到下、从左到右)与段落结构,不要添加解释。只输出文字本身。",
-        { signal, deadlineAt },
+        {
+          signal,
+          deadlineAt,
+          currentModel: ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined,
+        },
       );
       if (!answer.ok) {
         const result = { ...parseVisionFailure(answer.json), engine: "none", ok: false, complete: false, text: "" };
@@ -585,7 +589,11 @@ export function registerPixelTools(pi: ExtensionAPI, chain: VisionChain): void {
               [part],
               "请原样转述这张长截图分片中的所有文字,保持阅读顺序(从上到下、从左到右)," +
                 "不要添加解释,只输出文字本身。如果画面中没有可见文字,只输出 EMPTY,不要编造内容。",
-              { signal, deadlineAt },
+              {
+                signal,
+                deadlineAt,
+                currentModel: ctx.model ? { provider: ctx.model.provider, modelId: ctx.model.id } : undefined,
+              },
             );
             if (!answer.ok) {
               const detail = parseVisionFailure(answer.json);
