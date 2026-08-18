@@ -22,7 +22,7 @@ const AUTH_PATTERNS = [/\b401\b/, /\b403\b/, /unauthorized/i, /invalid api[ -]?k
 const RATE_LIMIT_PATTERNS = [/\b429\b/, /rate.?limit/i, /too many requests/i];
 const TIMEOUT_PATTERNS = [/abort/i, /timeout/i, /etimedout/i, /timed ?out/i, /deadline exceeded/i];
 const SERVER_PATTERNS = [/\b500\b/, /\b502\b/, /\b503\b/, /\b504\b/, /bad gateway/i, /service unavailable/i];
-const INVALID_REQUEST_PATTERNS = [/\b400\b/, /\b404\b/, /\b422\b/, /invalid request/i, /does not support image/i, /invalid model/i, /no such model/i, /model not exist/i];
+const INVALID_REQUEST_PATTERNS = [/\b400\b/, /\b404\b/, /\b413\b/, /\b422\b/, /invalid request/i, /does not support image/i, /invalid model/i, /no such model/i, /model not exist/i, /request body/i];
 const NETWORK_PATTERNS = [/econn/i, /enotfound/i, /network/i, /fetch failed/i, /socket/i, /connection reset/i, /dns/i];
 const QUOTA_PATTERNS = [/\b402\b/, /insufficient/i, /balance/i, /credits/i];
 
@@ -41,7 +41,7 @@ export function kindForStatus(status: number | undefined): FailureKind | undefin
   if (status === 401 || status === 403) return "AUTH";
   if (status === 429) return "RATE_LIMIT";
   if (status === 402) return "QUOTA";
-  if (status === 400 || status === 404 || status === 422) return "INVALID_REQUEST";
+  if (status === 400 || status === 404 || status === 413 || status === 422) return "INVALID_REQUEST";
   if (status !== undefined && status >= 500 && status <= 599) return "SERVER";
   return undefined;
 }
@@ -55,14 +55,14 @@ export function classifyFailure(error: { status?: number; message: string; retry
   return { kind, retryAfterMs: error.retryAfterMs };
 }
 
-/** per-backend 熔断器:认证类熔断 10 分钟,限频按 Retry-After 冷却,无效请求本轮熔断。 */
+/** per-backend 熔断器:认证类熔断 10 分钟,限频按 Retry-After 冷却。 */
 const AUTH_TRIP_MS = 10 * 60 * 1000;
 const DEFAULT_RATE_COOLDOWN_MS = 60 * 1000;
 
 export class VisionCircuit {
-  private backends = new Map<string, { authUntil?: number; cooldownUntil?: number; invalidTurn?: number }>();
+  private backends = new Map<string, { authUntil?: number; cooldownUntil?: number }>();
 
-  inspect(id: string, turn: number, now = Date.now()): { blocked: boolean; reason?: string } {
+  inspect(id: string, _turn: number, now = Date.now()): { blocked: boolean; reason?: string } {
     const hit = this.backends.get(id);
     if (!hit) return { blocked: false };
     if (hit.cooldownUntil !== undefined && hit.cooldownUntil > now) {
@@ -71,13 +71,10 @@ export class VisionCircuit {
     if (hit.authUntil !== undefined && hit.authUntil > now) {
       return { blocked: true, reason: "auth failure cooldown" };
     }
-    if (hit.invalidTurn === turn) {
-      return { blocked: true, reason: "invalid request this turn" };
-    }
     return { blocked: false };
   }
 
-  record(id: string, failure: BackendFailure, turn: number, now = Date.now()): void {
+  record(id: string, failure: BackendFailure, _turn: number, now = Date.now()): void {
     const hit = this.backends.get(id) ?? {};
     this.backends.set(id, hit);
     if (failure.kind === "AUTH" || failure.kind === "QUOTA") {
@@ -89,11 +86,8 @@ export class VisionCircuit {
       hit.cooldownUntil = Math.max(hit.cooldownUntil ?? 0, now + cooldown);
       return;
     }
-    if (failure.kind === "INVALID_REQUEST") {
-      hit.invalidTurn = turn;
-      return;
-    }
-    // TIMEOUT / SERVER / NETWORK / OTHER 不熔断:换个后端试,下轮还可再用
+    // INVALID_REQUEST / TIMEOUT / SERVER / NETWORK / OTHER 不熔断：
+    // 调用方可能修正图片、参数或请求体后再次使用同一后端。
   }
 
   clear(id: string): void {
@@ -136,9 +130,14 @@ export class TurnMemory {
 
 export const DO_NOT_RETRY_ADVICE =
   "Vision backends are unavailable for this turn (auth failure, rate limit, timeout or outage). " +
-  "Do NOT call vision_describe again this turn with a reworded question — rephrasing cannot fix an " +
+  "Do NOT call backend-dependent vision tools again this turn with only a reworded question — rephrasing cannot fix an " +
   "auth, rate-limit or infrastructure failure. Answer from the information you already have and " +
-  "continue the text task; tell the user vision is temporarily unavailable.";
+  "continue the text task; local-only tools such as crop, colors, pixel diff, foreground extraction, trace, " +
+  "HTML screenshot and Tesseract OCR may still work. Tell the user the remote vision backend is temporarily unavailable.";
+
+const CORRECT_REQUEST_ADVICE =
+  "The backend rejected this request as invalid or too large. Correct the image path, format, count, size, " +
+  "or tool parameters before retrying; do not retry the identical request.";
 
 const CODE_FOR_ONLY_KIND: Partial<Record<FailureKind, string>> = {
   AUTH: "VISION_AUTH_FAILED",
@@ -149,13 +148,14 @@ const CODE_FOR_ONLY_KIND: Partial<Record<FailureKind, string>> = {
 /** 组结构化失败 JSON:工具描述里的 FAILURE SEMANTICS 承诺的就是这个形状。 */
 export function buildFailureJson(kinds: FailureKind[], attempted: string[]): string {
   const set = new Set(kinds);
+  const correctable = set.has("INVALID_REQUEST");
   const code =
     set.size === 1 ? CODE_FOR_ONLY_KIND[[...set][0]] ?? "VISION_BACKEND_UNAVAILABLE" : "VISION_BACKEND_UNAVAILABLE";
   return JSON.stringify({
     ok: false,
     code,
-    retryable: false,
-    reason: DO_NOT_RETRY_ADVICE,
+    retryable: correctable,
+    reason: correctable ? CORRECT_REQUEST_ADVICE : DO_NOT_RETRY_ADVICE,
     attemptedBackends: attempted,
   });
 }

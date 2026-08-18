@@ -11,23 +11,11 @@ export interface VisionBackend {
   maxTokens: number;
 }
 
-/** 一次只需注册表两个方法,避免依赖 pi 内部类型。 */
-export interface ProviderLookup {
-  getProviderAuth(
-    providerId: string,
-  ): Promise<{ auth: { apiKey?: string; baseUrl?: string } } | undefined>;
-  getProvider(providerId: string): { baseUrl?: string } | undefined;
-}
-
-// 主力后端:走 pi 已配置的智谱 Coding Plan(zai-coding-cn/glm-4.6v,国内直连,已实测可用)
-const ZAI_PROVIDER = "zai-coding-cn";
-const ZAI_MODEL = "glm-4.6v";
-const ZAI_BASE_URL = "https://open.bigmodel.cn/api/coding/paas/v4";
-
 // OVHcloud AI Endpoints 匿名免费层做低频兜底:每 IP 每模型 2 次/分钟,免 Key,
 // 国外域名走 pi 全局 EnvHttpProxyAgent(Clash 规则分流)。
 // 顺序沿用 dsh 的"从大到小",质量优先;一个模型 429 可立即换下一个模型的独立额度。
 const OVH_BASE_URL = "https://oai.endpoints.kepler.ai.cloud.ovh.net/v1";
+const OVH_REQUEST_LIMIT_BYTES = 10 * 1024 * 1024;
 export const OVH_CHAIN: VisionBackend[] = [
   { id: "ovh/Qwen3.5-397B-A17B", baseURL: OVH_BASE_URL, model: "Qwen3.5-397B-A17B", maxTokens: 4096 },
   { id: "ovh/Qwen2.5-VL-72B-Instruct", baseURL: OVH_BASE_URL, model: "Qwen2.5-VL-72B-Instruct", maxTokens: 4096 },
@@ -36,28 +24,19 @@ export const OVH_CHAIN: VisionBackend[] = [
   { id: "ovh/Qwen3.5-9B", baseURL: OVH_BASE_URL, model: "Qwen3.5-9B", maxTokens: 4096 },
 ];
 
-/** 解析主力后端;pi 里未配置智谱凭证时返回 undefined,链上只剩 OVH 匿名层。 */
-export async function resolvePrimaryBackend(registry: ProviderLookup): Promise<VisionBackend | undefined> {
-  let auth: Awaited<ReturnType<ProviderLookup["getProviderAuth"]>>;
-  try {
-    auth = await registry.getProviderAuth(ZAI_PROVIDER);
-  } catch {
-    return undefined;
-  }
-  const apiKey = auth?.auth.apiKey;
-  if (!apiKey) return undefined;
-  const baseURL = auth?.auth.baseUrl ?? registry.getProvider(ZAI_PROVIDER)?.baseUrl ?? ZAI_BASE_URL;
-  return { id: `${ZAI_PROVIDER}/${ZAI_MODEL}`, baseURL, model: ZAI_MODEL, apiKey, maxTokens: 4096 };
-}
-
 /** 带 HTTP 状态与 Retry-After 的调用错误,供失败分类使用。 */
 export class VisionHttpError extends Error {
+  readonly status?: number;
+  readonly retryAfterMs?: number;
+
   constructor(
     message: string,
-    readonly status?: number,
-    readonly retryAfterMs?: number,
+    status?: number,
+    retryAfterMs?: number,
   ) {
     super(message);
+    this.status = status;
+    this.retryAfterMs = retryAfterMs;
   }
 }
 
@@ -84,15 +63,22 @@ export async function callVisionBackend(
   }));
   content.push({ type: "text", text: prompt });
   const url = `${backend.baseURL.replace(/\/$/, "")}/chat/completions`;
+  const body = JSON.stringify({
+    model: backend.model,
+    messages: [{ role: "user", content }],
+    max_tokens: backend.maxTokens,
+    stream: false,
+  });
+  if (backend.baseURL.startsWith(OVH_BASE_URL) && Buffer.byteLength(body, "utf8") > OVH_REQUEST_LIMIT_BYTES) {
+    throw new VisionHttpError(
+      "vision request exceeds the OVH 10MB request-body limit; use a smaller or compressed copy for this fallback backend",
+      413,
+    );
+  }
   const response = await fetch(url, {
     method: "POST",
     headers,
-    body: JSON.stringify({
-      model: backend.model,
-      messages: [{ role: "user", content }],
-      max_tokens: backend.maxTokens,
-      stream: false,
-    }),
+    body,
     signal: options.signal,
   });
   if (!response.ok) {
@@ -175,4 +161,28 @@ export function extractJson(text: string): Record<string, unknown> | undefined {
   const end = text.lastIndexOf("}");
   if (start >= 0 && end > start) return tryParse(text.slice(start, end + 1));
   return undefined;
+}
+
+const STRUCTURED_ENTITY_TYPES = new Set(["button", "input", "text", "image", "link", "icon", "other"]);
+
+/** 校验 vision_describe json:true 承诺的固定四字段结构。 */
+export function isStructuredDescription(value: Record<string, unknown>): boolean {
+  const keys = Object.keys(value).sort();
+  if (keys.join(",") !== "entities,layout,summary,text") return false;
+  if (typeof value.summary !== "string" || typeof value.text !== "string") return false;
+  if (!Array.isArray(value.layout) || !Array.isArray(value.entities)) return false;
+  const layoutOk = value.layout.every((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const row = item as Record<string, unknown>;
+    return Object.keys(row).sort().join(",") === "content,region" &&
+      typeof row.region === "string" && typeof row.content === "string";
+  });
+  const entitiesOk = value.entities.every((item) => {
+    if (!item || typeof item !== "object" || Array.isArray(item)) return false;
+    const entity = item as Record<string, unknown>;
+    return Object.keys(entity).sort().join(",") === "label,type" &&
+      typeof entity.type === "string" && STRUCTURED_ENTITY_TYPES.has(entity.type) &&
+      typeof entity.label === "string";
+  });
+  return layoutOk && entitiesOk;
 }

@@ -23,33 +23,40 @@ pi update git:github.com/buyi1net/pi-eyes
 pi remove git:github.com/buyi1net/pi-eyes
 ```
 
-安装后重启 pi(或 `/reload`)即可,无需其它配置。建议为会话选一个文本模型(如 `deepseek/deepseek-v4-flash`、`zai-coding-cn/glm-5.2`),模型会自主调用下列工具看图。
+安装后重启 pi(或 `/reload`)即可直接使用。建议为会话选一个文本模型(如 `deepseek/deepseek-v4-flash`、`zai-coding-cn/glm-5.2`),模型会自主调用下列工具看图。需要更换辅助视觉模型或匿名链策略时,运行 `/eyes-setup`。
+
+## 配置辅助视觉模型
+
+在 Pi 交互界面输入 `/eyes-setup`,即可使用简体中文/英文向导。它会读取 Pi 已登记的模型,只把能力声明中包含图片输入的模型列为视觉模型,并显示当前可用状态。用户还可以刷新列表,或确认后用插件内置色块图测试所选模型;打开设置页本身不会发送图片。
+
+可选策略为“所选 Pi 模型优先、匿名链兜底”“仅所选 Pi 模型”“仅匿名链”。默认仍是 `zai-coding-cn/glm-4.6v` 优先、匿名链兜底,因此不运行设置也能使用。全局配置位于 `~/.pi/agent/pi-eyes.json`;受信任项目可保存 `<项目>/.pi/pi-eyes.json` 覆盖全局配置。插件只保存 provider/model 标识和策略,不保存密钥;模型调用与认证均走 Pi 自己的模型注册表。
 
 ## 工具(12 个)
 
 | 工具 | 作用 |
 |---|---|
 | vision_describe | 看图问答,1-4 张,可要求 JSON 结构化 |
-| vision_ground | 定位目标,返回原图像素框 + 标注图 |
-| vision_detect | 找同类元素,编号清单 + 编号标注图 |
-| vision_crop | 裁剪区域存 PNG |
-| vision_present | 用系统看图器把图展示给用户 |
+| vision_ground | 定位目标,返回原图像素框;标注图默认不生成 |
+| vision_detect | 找同类元素,编号清单;标注图默认不生成 |
+| vision_crop | 裁剪区域存 PNG,再交给分析工具查看 |
+| vision_present | 在 pi 工具结果中内联预览,不打开系统看图器 |
 | vision_pixel_diff | 逐像素对比:差异率、最差区域、热力图 + 报告 |
 | vision_colors | 主色提取(hex + 占比) |
-| vision_ocr | 图中文字转写(本地 tesseract 优先,视觉模型兜底) |
-| vision_long_screenshot_ocr | 长截图分块转写为 Markdown |
+| vision_ocr | 图中文字转写;可自动选择或强制 tesseract/视觉后端 |
+| vision_long_screenshot_ocr | 长截图分块、去重,输出 Markdown 与完整性统计 |
 | vision_trace | 位图转 SVG(彩色分色 / 灰度分层) |
 | vision_extract_foreground | 纯色背景抠图为透明 PNG |
 | vision_html_screenshot | 本地 HTML 无头 Chrome 截图(viewport / fullPage) |
 
 招牌流程:参考图 → 实现 HTML → `vision_html_screenshot` 截图 → `vision_pixel_diff` 度量 → 修复 → 迭代到差异收敛。
 
-**模型能力自适应**:原生多模态模型(如 gpt-5.5、glm-4.6v)用自己的视觉直接看图,`vision_describe` 对它们自动禁用(避免冗余后端调用);像素级度量工具(ground/detect/crop/pixel_diff/ocr/trace 等)对任何模型保留——它们是原生视觉做不了的精确操作。纯文本模型的全部工具可用。
+扩展不会在切换模型时擅自增删 active tools。原生多模态模型可直接看图,纯文本模型用 `vision_describe` 获得语义视觉;ground/detect/crop/pixel_diff/ocr/trace 等专用工具对所有模型保留。用户贴图会按 pi 的图片结构落到会话临时目录,把可调用路径告知纯文本模型,同一会话可跨轮继续使用,会话关闭后自动清理。
 
 ## 视觉后端与隐私
 
-- 主力后端:pi 里已配置的 `zai-coding-cn/glm-4.6v`(凭证从 pi 的认证体系现取,本扩展不保存任何密钥);
-- 兜底:OVHcloud AI Endpoints 匿名免费层(免 Key,每 IP 每模型 2 次/分钟);
+- 默认主力后端:Pi 里登记的 `zai-coding-cn/glm-4.6v`(可通过 `/eyes-setup` 换成其它 Pi 视觉模型);
+- 默认兜底:OVHcloud AI Endpoints 匿名免费层(免 Key,每 IP 每模型 2 次/分钟,可关闭或设为唯一后端);
+- 图片会发送到所选远端视觉模型,使用匿名兜底时还可能发送到 OVH;请勿提交不适合发送到对应服务的敏感图片;
 - 看图请求只包含所问图片与问题文本;失败按类别熔断,不会反复重试。
 
 ## 可选增强(不装也能用)

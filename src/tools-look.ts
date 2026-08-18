@@ -4,19 +4,26 @@
 
 import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { Type } from "@earendil-works/pi-ai";
-import { resolve } from "node:path";
-import { join } from "node:path";
+import { randomUUID } from "node:crypto";
+import { join, resolve } from "node:path";
 import { stat, mkdir } from "node:fs/promises";
 import type { VisionChain } from "./chain";
-import { decodeImage, cropToPng, annotateBoxes, artifactStem, artifactsDir, imagePartFromPath, openWithSystemViewer } from "./pixels";
+import {
+  decodeImage,
+  probeImage,
+  cropToPng,
+  annotateBoxes,
+  artifactStem,
+  artifactsDir,
+  imagePartFromPath,
+} from "./pixels";
 import { extractJson } from "./backends";
 import { normalizeDetectResult, type Box } from "./algorithms";
 
 // dsh 同款 deadline 预算:一次工具任务内所有后端尝试与重试共享
 const TASK_DEADLINE_MS = 180_000;
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
 
-const IMAGE_ARG_DOC = "Local image path (png/jpeg/webp/gif), workspace-relative or absolute";
+const IMAGE_ARG_DOC = "Local image path (png/jpeg/webp/gif), absolute or relative to the working directory";
 
 /** 统一路径解析:剥 @ 前缀、相对 cwd。 */
 function resolveImagePath(cwd: string, input: string): string {
@@ -57,23 +64,26 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
       "Locate a target in an image and return its ORIGINAL-pixel bounding box (x1/y1/x2/y2), " +
       "optionally producing an annotated PNG artifact. Pair with vision_crop and vision_pixel_diff " +
       "for a verify-able pixel loop (reference -> implementation -> screenshot -> metrics). " +
-      "If the result is JSON with ok:false, the vision backends are unavailable — do not retry with " +
-      "reworded instructions this turn.",
+      "Use this for one named target; use vision_detect for every matching element. Annotation is off by default. " +
+      "If the result is JSON with ok:false, inspect retryable: correct invalid input when true; when false, " +
+      "do not retry with only reworded instructions this turn.",
     promptSnippet: "Locate a target in an image and get its original-pixel bounding box",
     parameters: Type.Object({
       image: Type.String({ description: IMAGE_ARG_DOC }),
-      target: Type.String({ description: 'What to locate, e.g. "the send button"' }),
-      annotate: Type.Optional(Type.Boolean({ description: "Also write an annotated PNG with the box drawn (default true)" })),
+      target: Type.String({ minLength: 1, description: 'Required target to locate, e.g. "the send button"' }),
+      annotate: Type.Optional(Type.Boolean({ description: "Also write an annotated PNG with the box drawn (default false)" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const path = resolveImagePath(ctx.cwd, params.image);
-      const { width, height } = await decodeImage(path);
+      const { width, height } = await probeImage(path, signal);
       if (width <= 0 || height <= 0) throw new Error("vision_ground: could not read image dimensions");
+      const target = params.target.trim();
+      if (target === "") throw new Error("vision_ground: target is required and cannot be blank");
       const deadlineAt = Date.now() + TASK_DEADLINE_MS;
-      const part = await imagePartFromPath(path, MAX_IMAGE_BYTES);
+      const part = await imagePartFromPath(path, { signal });
 
       const instruction =
-        `Target to locate: "${params.target.slice(0, 500)}". ` +
+        `Target to locate: "${target.slice(0, 500)}". ` +
         `The image is ${width}x${height} pixels. Return ONE JSON object with integer fields ` +
         `{"x1":...,"y1":...,"x2":...,"y2":...} — the tight bounding box of that target in ` +
         `ORIGINAL image pixels (0 <= x1 < x2 <= ${width}, 0 <= y1 < y2 <= ${height}). ` +
@@ -115,9 +125,9 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
       }
 
       const result: Record<string, unknown> = { ...clamped, width, height, backend: answer.backend };
-      if (params.annotate !== false) {
-        const outPath = await artifactPath(ctx.cwd, `${artifactStem(params.image, "ground")}.png`);
-        await annotateBoxes(path, [clamped], outPath);
+      if (params.annotate === true) {
+        const outPath = await artifactPath(ctx.cwd, `${artifactStem(params.image, `ground-${randomUUID().slice(0, 8)}`)}.png`);
+        await annotateBoxes(path, [clamped], outPath, signal);
         result.annotatedPath = outPath;
       }
       return { content: [{ type: "text", text: JSON.stringify(result) }], details: { backend: answer.backend } };
@@ -132,23 +142,27 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
       "Find every element of a kind in an image (buttons, inputs, links, icons…) and return a " +
       "numbered inventory with ORIGINAL-pixel boxes, optionally annotated on the image. The model " +
       'can then reference "element #3" in follow-up vision_crop / vision_describe calls. ' +
-      "If the result is JSON with ok:false, the vision backends are unavailable — do not retry with " +
-      "reworded instructions this turn.",
+      "Use this for all matches of a required target kind; use vision_ground for one named target. " +
+      "Annotation is off by default. " +
+      "If the result is JSON with ok:false, inspect retryable: correct invalid input when true; when false, " +
+      "do not retry with only reworded instructions this turn.",
     promptSnippet: "List every element of a kind in an image with numbered original-pixel boxes",
     parameters: Type.Object({
       image: Type.String({ description: IMAGE_ARG_DOC }),
       target: Type.String({
-        description: 'What kind of elements to list, e.g. "buttons", "input fields", "navigation links" (default: interactive elements)',
+        minLength: 1,
+        description: 'Required kind of elements to list, e.g. "buttons", "input fields", or "navigation links"',
       }),
-      annotate: Type.Optional(Type.Boolean({ description: "Also write an annotated PNG with numbered boxes (default true)" })),
+      annotate: Type.Optional(Type.Boolean({ description: "Also write an annotated PNG with numbered boxes (default false)" })),
     }),
     async execute(_id, params, signal, _onUpdate, ctx) {
       const path = resolveImagePath(ctx.cwd, params.image);
-      const { width, height } = await decodeImage(path);
+      const { width, height } = await probeImage(path, signal);
       if (width <= 0 || height <= 0) throw new Error("vision_detect: could not read image dimensions");
-      const target = params.target.trim() !== "" ? params.target : "interactive elements";
+      const target = params.target.trim();
+      if (target === "") throw new Error("vision_detect: target is required and cannot be blank");
       const deadlineAt = Date.now() + TASK_DEADLINE_MS;
-      const part = await imagePartFromPath(path, MAX_IMAGE_BYTES);
+      const part = await imagePartFromPath(path, { signal });
 
       const instruction = visionDetectInstruction(target, width, height);
       let answer = await chain.ask(ctx.modelRegistry, [part], instruction, { signal, deadlineAt });
@@ -165,16 +179,18 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
         answer = retry;
         parsed = extractJson(retry.text);
       }
-      const result = normalizeDetectResult(parsed, width, height);
-      if (result === undefined) {
+      const normalized = normalizeDetectResult(parsed, width, height);
+      if (normalized === undefined) {
         throw new Error(`vision_detect: the vision model did not return a valid inventory. Raw output: ${answer.text.slice(0, 500)}`);
       }
-      if (params.annotate !== false && result.elements.length > 0) {
-        const outPath = await artifactPath(ctx.cwd, `${artifactStem(params.image, "detect")}.png`);
+      const result: typeof normalized & { annotatedPath?: string } = normalized;
+      if (params.annotate === true && result.elements.length > 0) {
+        const outPath = await artifactPath(ctx.cwd, `${artifactStem(params.image, `detect-${randomUUID().slice(0, 8)}`)}.png`);
         await annotateBoxes(
           path,
           result.elements.map((e) => ({ ...e.box, label: String(e.number) })),
           outPath,
+          signal,
         );
         result.annotatedPath = outPath;
       }
@@ -188,15 +204,16 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
     label: "Vision Crop",
     description:
       "Crop a pixel region (x1,y1,x2,y2 in ORIGINAL pixels) out of an image and write the " +
-      "result as a PNG artifact for a closer look.",
-    promptSnippet: "Crop a pixel region out of an image into a PNG for a closer look",
+      "result as a PNG artifact. This is a local transform and does not inspect the crop. A text-only " +
+      "model must pass the returned path to vision_describe, vision_ocr, or another analysis tool.",
+    promptSnippet: "Crop a pixel region to a PNG; analyze the returned path with another vision tool",
     parameters: Type.Object({
       image: Type.String({ description: IMAGE_ARG_DOC }),
       region: Type.String({ description: 'Pixel box "x1,y1,x2,y2" in original image coordinates' }),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, _onUpdate, ctx) {
       const path = resolveImagePath(ctx.cwd, params.image);
-      const { width, height } = await decodeImage(path);
+      const { width, height } = await probeImage(path, signal);
       const box = parseRegion(params.region);
       if (box === undefined) {
         throw new Error(`vision_crop: invalid region "${params.region}" (expect "x1,y1,x2,y2" integers)`);
@@ -204,9 +221,9 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
       if (box.x2 > width || box.y2 > height) {
         throw new Error(`vision_crop: region exceeds image bounds (${width}x${height})`);
       }
-      const name = `${artifactStem(params.image, `crop-${box.x1}-${box.y1}-${box.x2}-${box.y2}`)}.png`;
+      const name = `${artifactStem(params.image, `crop-${box.x1}-${box.y1}-${box.x2}-${box.y2}-${randomUUID().slice(0, 8)}`)}.png`;
       const outPath = await artifactPath(ctx.cwd, name);
-      await cropToPng(path, box, outPath);
+      await cropToPng(path, box, outPath, signal);
       const info = await stat(outPath);
       return {
         content: [
@@ -225,27 +242,27 @@ export function registerLookTools(pi: ExtensionAPI, chain: VisionChain): void {
     name: "vision_present",
     label: "Vision Present",
     description:
-      "Present a generated local image directly to the user with the system image viewer. " +
-      "MANDATORY PRESENTATION RULE: when you generate, edit, screenshot, or export an image and want the user " +
-      "to see it, you MUST call vision_present. Reading an image file with read is only for model-side " +
-      "inspection; NEVER use read to present or send an image to the user.",
-    promptSnippet: "Open a local image in the system viewer to show it to the user",
+      "Return a local image as inline tool-result content so it can be previewed in pi without opening an " +
+      "external system viewer. Use this only when an inline preview adds value or the user asks to see the " +
+      "artifact; creating or analyzing an image does not require this extra call.",
+    promptSnippet: "Preview a local image inline in pi without opening an external viewer",
     promptGuidelines: [
-      "Use vision_present whenever an image is generated, edited, cropped, screenshotted or exported and the user should see it.",
+      "Use vision_present only for an intentional inline preview; do not call it automatically after every generated, edited, cropped, or exported image.",
     ],
     parameters: Type.Object({
       image: Type.String({ description: IMAGE_ARG_DOC }),
       label: Type.Optional(Type.String({ description: "Optional short user-facing label for the image" })),
     }),
-    async execute(_id, params, _signal, _onUpdate, ctx) {
+    async execute(_id, params, signal, _onUpdate, ctx) {
       const path = resolveImagePath(ctx.cwd, params.image);
-      // 先校验是图且存在,再拉起看图器
-      await imagePartFromPath(path, MAX_IMAGE_BYTES);
-      await openWithSystemViewer(path);
+      const image = await imagePartFromPath(path, { signal });
       const label = params.label && params.label.trim() !== "" ? params.label.trim().slice(0, 200) : "image";
       return {
-        content: [{ type: "text", text: JSON.stringify({ path, label, safePresentation: true, opened: true }) }],
-        details: { path },
+        content: [
+          { type: "text", text: JSON.stringify({ path, label, presented: "inline" }) },
+          { type: "image", data: image.data, mimeType: image.mediaType },
+        ],
+        details: { path, label, presented: "inline" },
       };
     },
   });

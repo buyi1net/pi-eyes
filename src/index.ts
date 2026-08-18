@@ -3,105 +3,217 @@
 // 看图是工具调用,不是整轮切模型,可多步迭代(ground -> crop -> describe -> diff)。
 // 工具描述文案与失败语义沿 dsh 调教版(见 ../../reference/核心依据/dsh-vision-router/)。
 
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { Type } from "@earendil-works/pi-ai";
-import { mkdir, writeFile } from "node:fs/promises";
+import {
+  CONFIG_DIR_NAME,
+  getAgentDir,
+  type ExtensionAPI,
+  type ExtensionCommandContext,
+  type ExtensionContext,
+} from "@earendil-works/pi-coding-agent";
+import { Type, type ImageContent } from "@earendil-works/pi-ai";
+import { randomUUID } from "node:crypto";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
-import { visionDescribePrompt, extractJson } from "./backends";
+import { visionDescribePrompt, extractJson, isStructuredDescription } from "./backends";
 import { VisionChain } from "./chain";
+import {
+  DEFAULT_PI_EYES_CONFIG,
+  getPiEyesConfigPaths,
+  loadPiEyesConfig,
+  savePiEyesConfig,
+  type ResolvedPiEyesConfig,
+} from "./config";
+import { testPiVisionModel } from "./pi-model-backend";
+import { registerEyesSetup, type EyesSetupConfig, type SetupScope } from "./setup";
 import { registerLookTools } from "./tools-look";
 import { registerPixelTools } from "./tools-pixels";
 import { imagePartFromPath } from "./pixels";
 
 const TASK_DEADLINE_MS = 180_000;
-const MAX_IMAGE_BYTES = 10 * 1024 * 1024;
+const VISION_PROBE_IMAGE = {
+  mediaType: "image/png",
+  data: "iVBORw0KGgoAAAANSUhEUgAAAGAAAABACAYAAADlNHIOAAAAlklEQVR4nO3RwQkAMAgEwSs9nRvSQ+BARty/MplkmuWU674/9QsAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAMAOgLfFkm7tAQAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAD7MBUWbzxwABZ5XAAAAAElFTkSuQmCC",
+};
+const VISION_PROBE_EXPECTED = ["red", "green", "blue", "yellow", "black", "white"] as const;
 // 用户贴图落地目录(dsh attachmentId 的 pi 等价物:文件路径即引用)
-const ATTACHMENTS_DIR = join(tmpdir(), "pi-vision-attachments");
+const ATTACHMENTS_DIR = join(tmpdir(), "pi-vision-attachments", `${process.pid}-${randomUUID()}`);
 
 const DESCRIPTION =
-  "Look at images with the vision backend chain and answer a focused question about them. " +
+  "Answer a semantic question about one or more images with the vision backend chain. " +
   "For text-only sessions this is the bridge that provides image understanding; for native multimodal " +
-  "sessions it is an optional second look for structured evidence, comparison or verification. " +
-  "Supports comparing multiple images (e.g. a design mock vs an implementation screenshot). Provide " +
+  "sessions it is an optional second opinion for structured evidence, comparison or verification. " +
+  "Use vision_ocr for faithful text extraction, vision_ground for one target box, vision_detect for an " +
+  "inventory of matching elements, and vision_colors for a measured palette instead of asking this tool " +
+  "to approximate those operations. Supports image comparison; provide " +
   "`paths` (local image file paths, png/jpeg/webp/gif), 1-4 images in total. `question` is the " +
-  "question to answer; be specific. Set `json: true` to require a single valid JSON object as the answer. " +
-  "FAILURE SEMANTICS: if the result is JSON with ok:false and a code like VISION_AUTH_FAILED, " +
-  "VISION_RATE_LIMITED, VISION_TIMEOUT or VISION_BACKEND_UNAVAILABLE_THIS_TURN, the vision backends " +
-  "are unavailable this turn. Do NOT call vision_describe again with a reworded question — rephrasing " +
+  "question to answer; be specific. Set `json: true` for the fixed object schema " +
+  "{summary,layout,entities,text}, not an arbitrary caller-defined schema. Paths may be absolute or " +
+  "relative to the working directory. " +
+  "FAILURE SEMANTICS: if the result is JSON with ok:false, inspect retryable. A retryable:true result " +
+  "means the path, format, count, size, or parameters must be corrected before retrying. For retryable:false " +
+  "codes like VISION_AUTH_FAILED, " +
+  "VISION_RATE_LIMITED, VISION_TIMEOUT or VISION_BACKEND_UNAVAILABLE, the vision backends " +
+  "are unavailable this turn. Do NOT call vision_describe again with only a reworded question — rephrasing " +
   "cannot fix an auth, rate-limit or outage problem. Answer from the information you already have and " +
   "continue the text task, telling the user vision is temporarily unavailable. " +
   "Only content-level uncertainty in a SUCCESSFUL answer justifies a second look.";
 
-interface PastedImage {
-  type: "image";
-  source: { type: "base64"; media_type?: string; mediaType?: string; data: string };
+function configPaths(ctx: ExtensionContext) {
+  return getPiEyesConfigPaths(ctx.cwd, getAgentDir(), CONFIG_DIR_NAME);
+}
+
+function setupLanguage(config: ResolvedPiEyesConfig): "zh-CN" | "en" {
+  if (config.ui.language !== "auto") return config.ui.language;
+  return Intl.DateTimeFormat().resolvedOptions().locale.toLowerCase().startsWith("zh") ? "zh-CN" : "en";
+}
+
+function toSetupConfig(config: ResolvedPiEyesConfig): EyesSetupConfig {
+  const selected = config.backend.selectedModel;
+  const mode = selected === null
+    ? "anonymous-only"
+    : config.backend.anonymousChain.enabled
+      ? "auto"
+      : "pi-only";
+  return {
+    version: 1,
+    language: setupLanguage(config),
+    backend: {
+      mode,
+      ...(selected ? { model: { provider: selected.provider, id: selected.model } } : {}),
+    },
+  };
+}
+
+function setupUpdate(config: EyesSetupConfig): Record<string, unknown> {
+  const selectedModel = config.backend.mode === "anonymous-only"
+    ? null
+    : { provider: config.backend.model!.provider, model: config.backend.model!.id };
+  return {
+    schemaVersion: 1,
+    ui: { language: config.language },
+    backend: {
+      selectedModel,
+      anonymousChain: {
+        enabled: config.backend.mode !== "pi-only",
+        position: config.backend.mode === "anonymous-only" ? "primary" : "fallback",
+      },
+    },
+  };
 }
 
 export default function (pi: ExtensionAPI) {
   const chain = new VisionChain();
+  let activeConfig = DEFAULT_PI_EYES_CONFIG;
 
-  // 多模态模型用自己的原生视觉工作(用户拍板):vision_describe 只是"看图回答",
-  // 多模态模型原生就能做,禁用避免冗余后端调用;像素级工具(ground/detect/
-  // crop/diff/ocr/trace/…)是原生视觉做不了的度量操作,对任何模型一律保留。
-  // 回加只针对自己移除的:用户经 pi config 手动禁用的不碰。
-  let describeRemovedByUs = false;
-  const applyDescribeGating = (model: { input?: readonly string[] } | undefined) => {
-    const multimodal = model?.input?.includes("image") === true;
-    const active = pi.getActiveTools();
-    if (multimodal) {
-      const next = active.filter((name) => name !== "vision_describe");
-      if (next.length !== active.length) {
-        pi.setActiveTools(next);
-        describeRemovedByUs = true;
-      }
-    } else if (describeRemovedByUs && !active.includes("vision_describe")) {
-      pi.setActiveTools([...new Set([...active, "vision_describe"])]);
-      describeRemovedByUs = false;
+  const applyConfig = async (ctx: ExtensionContext, showWarnings = false): Promise<ResolvedPiEyesConfig> => {
+    const loaded = await loadPiEyesConfig({
+      ...configPaths(ctx),
+      projectTrusted: ctx.isProjectTrusted(),
+    });
+    activeConfig = loaded.config;
+    chain.setRouting({
+      selectedModel: activeConfig.backend.selectedModel
+        ? {
+            provider: activeConfig.backend.selectedModel.provider,
+            modelId: activeConfig.backend.selectedModel.model,
+          }
+        : null,
+      anonymousChain: activeConfig.backend.anonymousChain,
+    });
+    if (showWarnings && ctx.hasUI) {
+      for (const warning of loaded.warnings) ctx.ui.notify(warning, "warning");
     }
+    return activeConfig;
   };
-  // 启动/换模型都重算:会话启动时模型已定,session_start 覆盖;会话内 /model
-  // 切换由 model_select 覆盖(纯文本 ↔ 多模态互切即时生效)
-  pi.on("session_start", async (_event, ctx) => {
-    applyDescribeGating(ctx.model as { input?: readonly string[] } | undefined);
+
+  const saveSetupConfig = async (
+    scope: SetupScope,
+    config: EyesSetupConfig,
+    ctx: ExtensionCommandContext,
+  ): Promise<void> => {
+    if (scope === "project" && !ctx.isProjectTrusted()) {
+      throw new Error("当前项目未受信任，不能写入项目级 Pi Eyes 配置");
+    }
+    const paths = configPaths(ctx);
+    await savePiEyesConfig(scope === "project" ? paths.projectPath : paths.globalPath, setupUpdate(config));
+    await applyConfig(ctx, true);
+  };
+
+  registerEyesSetup(pi, {
+    loadConfig: async (ctx) => toSetupConfig(await applyConfig(ctx, true)),
+    saveConfig: saveSetupConfig,
+    refreshModels: async (ctx) => {
+      const result = await ctx.modelRegistry.refresh({ allowNetwork: false, signal: ctx.signal });
+      if (result.aborted) throw new Error("Pi 模型目录刷新已取消");
+      if (result.errors.size > 0) {
+        const details = [...result.errors.entries()]
+          .map(([provider, error]) => `${provider}: ${error.message}`)
+          .join("; ");
+        throw new Error(details);
+      }
+    },
+    testModel: async (model, ctx) => {
+      const result = await testPiVisionModel(
+        ctx.modelRegistry,
+        { provider: model.provider, modelId: model.id },
+        VISION_PROBE_IMAGE,
+        VISION_PROBE_EXPECTED,
+        { signal: ctx.signal },
+      );
+      return {
+        ok: result.passed,
+        message: `${result.matched}/${result.total}`,
+      };
+    },
   });
-  pi.on("model_select", async (event) => {
-    applyDescribeGating(event.model as { input?: readonly string[] });
+
+  // 不动态改写 active tools。多模态模型是否保留 vision_describe 由用户配置决定，
+  // 避免模型切换时把用户原本禁用的工具擅自重新启用。
+
+  pi.on("session_start", async (_event, ctx) => {
+    await applyConfig(ctx, true);
   });
 
   pi.on("agent_start", async () => {
     chain.beginTurn();
   });
 
+  pi.on("session_shutdown", async () => {
+    await rm(ATTACHMENTS_DIR, { recursive: true, force: true });
+  });
+
   // 用户在会话里贴的图落地成文件并告知路径。
   // 按模型能力分支(多模态:图直接进上下文,工具非必需;纯文本:工具是唯一看图途径)
   pi.on("before_agent_start", async (event, ctx) => {
-    const images = (event as { images?: PastedImage[] }).images ?? [];
+    const images: ImageContent[] = event.images ?? [];
     const saved: string[] = [];
     for (let i = 0; i < images.length; i++) {
       const image = images[i];
-      if (!image || image.type !== "image" || image.source?.type !== "base64" || !image.source.data) continue;
-      const mediaType = image.source.mediaType ?? image.source.media_type ?? "image/png";
-      const ext = mediaType === "image/jpeg" ? "jpg" : mediaType === "image/webp" ? "webp" : mediaType === "image/gif" ? "gif" : "png";
+      if (!image.data) continue;
+      const mediaType = image.mimeType || "image/png";
+      const ext =
+        mediaType === "image/jpeg" ? "jpg" : mediaType === "image/webp" ? "webp" : mediaType === "image/gif" ? "gif" : "png";
       await mkdir(ATTACHMENTS_DIR, { recursive: true });
       const target = join(ATTACHMENTS_DIR, `pasted-${Date.now()}-${i + 1}.${ext}`);
-      await writeFile(target, Buffer.from(image.source.data, "base64"));
+      await writeFile(target, Buffer.from(image.data, "base64"));
       saved.push(target);
     }
     if (saved.length === 0) return undefined;
     const multimodal = ctx.model?.input?.includes("image") === true;
     const content = multimodal
       ? `The user attached ${saved.length} image(s), also saved to disk (you can see them directly). ` +
-        `For pixel-precise work (bounding boxes, diff metrics, cropping) the vision_* tools are available; ` +
-        `a plain description question needs no tool:\n${saved.join("\n")}`
+        `Use native vision for ordinary viewing; use vision_ground/detect for boxes, vision_ocr for exact text, ` +
+        `vision_colors/pixel_diff for measurements, and vision_crop for a local transform:\n${saved.join("\n")}`
       : `The user attached ${saved.length} image(s) in this message. A text-only model cannot see them directly; ` +
-        `they were saved to disk. Use the vision_* tools (vision_describe / vision_ground / vision_ocr ...) ` +
-        `with these paths to look at them:\n${saved.join("\n")}`;
+        `they were saved to disk. Use vision_describe for visual meaning, vision_ocr for exact text, ` +
+        `vision_ground/detect for locations, or vision_colors/pixel_diff for measurements. After vision_crop ` +
+        `or vision_trace, pass the returned path to vision_describe or the relevant analysis tool:\n${saved.join("\n")}`;
     return {
       message: {
         customType: "pi-eyes",
         content,
-        display: true,
+        display: false,
       },
     };
   });
@@ -112,19 +224,21 @@ export default function (pi: ExtensionAPI) {
     description: DESCRIPTION,
     promptSnippet: "Look at local image files and answer focused questions via vision backends",
     promptGuidelines: [
-      "Use vision_describe when a task involves looking at image files (screenshots, photos, diagrams) or comparing several; text-only models cannot see images without it.",
+      "Use vision_describe for semantic image understanding or comparison. For exact text, boxes, palettes, or pixel metrics, use the corresponding specialized vision tool instead.",
     ],
     parameters: Type.Object({
       paths: Type.Array(Type.String(), {
         minItems: 1,
         maxItems: 4,
         description:
-          "Local image file paths (png/jpeg/webp/gif), absolute or relative to the working directory, 1-4 images",
+          "Local image paths (png/jpeg/webp/gif), absolute or relative to the working directory, 1-4 images",
       }),
       question: Type.String({
         description: 'The question for the vision model, e.g. "compare the two images and list the differences"',
       }),
-      json: Type.Optional(Type.Boolean({ description: "Require the answer to be a single valid JSON object" })),
+      json: Type.Optional(
+        Type.Boolean({ description: "Return the fixed {summary,layout,entities,text} JSON object (default false)" }),
+      ),
     }),
 
     async execute(_toolCallId, params, signal, onUpdate, ctx) {
@@ -135,7 +249,7 @@ export default function (pi: ExtensionAPI) {
         const path = resolve(ctx.cwd, trimmed);
         onUpdate?.({ content: [{ type: "text", text: `Reading ${trimmed}…` }] });
         try {
-          images.push(await imagePartFromPath(path, MAX_IMAGE_BYTES));
+          images.push(await imagePartFromPath(path, { signal }));
         } catch (error) {
           throw new Error(`vision_describe: ${error instanceof Error ? error.message : String(error)}`);
         }
@@ -151,23 +265,28 @@ export default function (pi: ExtensionAPI) {
       let text = answer.text;
       // json 模式:解析失败给一次"只回 JSON"的纠错重试(dsh 同款策略)
       if (params.json === true) {
+        let valid = false;
         for (let attempt = 0; attempt < 2; attempt++) {
           const parsed = extractJson(text);
-          if (parsed !== undefined) {
+          if (parsed !== undefined && isStructuredDescription(parsed)) {
             text = JSON.stringify(parsed);
+            valid = true;
             break;
           }
           if (attempt === 0) {
-            onUpdate?.({ content: [{ type: "text", text: "Answer was not valid JSON, retrying…" }] });
+            onUpdate?.({ content: [{ type: "text", text: "Answer did not match the fixed JSON schema, retrying…" }] });
             const retry = await chain.ask(
               ctx.modelRegistry,
               images,
-              prompt + "\n\nThat output was not valid JSON. Respond with ONLY a valid JSON object now.",
+              prompt + "\n\nThat output did not match the required {summary,layout,entities,text} schema. Respond with ONLY a conforming JSON object now.",
               { signal, deadlineAt },
             );
             if (!retry.ok) return { content: [{ type: "text", text: retry.json }], details: { backend: "none" } };
             text = retry.text;
           }
+        }
+        if (!valid) {
+          throw new Error("vision_describe: backend failed to return the required {summary,layout,entities,text} JSON schema after one correction attempt");
         }
       }
       return { content: [{ type: "text", text }], details: { backend: answer.backend } };

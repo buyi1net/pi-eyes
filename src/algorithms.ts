@@ -19,7 +19,7 @@ export function parseBox(value: string): Box | undefined {
   return { x1, y1, x2, y2 };
 }
 
-/** 逐像素 RGBA 对比:任一通道差超过 threshold 判为差异;8x8 网格取最差区域。 */
+/** 逐像素 RGBA 对比:包括 alpha 在内的任一通道差超过 threshold 判为差异;8x8 网格取最差区域。 */
 export function computePixelDiff(
   a: Uint8Array,
   b: Uint8Array,
@@ -34,7 +34,12 @@ export function computePixelDiff(
   for (let i = 0; i < pixels; i++) {
     const o = i * 4;
     const d =
-      Math.max(Math.abs(a[o] - b[o]), Math.abs(a[o + 1] - b[o + 1]), Math.abs(a[o + 2] - b[o + 2])) - threshold;
+      Math.max(
+        Math.abs(a[o] - b[o]),
+        Math.abs(a[o + 1] - b[o + 1]),
+        Math.abs(a[o + 2] - b[o + 2]),
+        Math.abs(a[o + 3] - b[o + 3]),
+      ) - threshold;
     if (d > 0) {
       differing += 1;
       mask[i] = 1;
@@ -97,9 +102,11 @@ export function quantizeColors(raw: Uint8Array, topN = 8, bins = 32): Array<{ he
   const step = 256 / bins;
   const counts = new Map<string, number>();
   const pixels = Math.floor(raw.length / 4);
+  let visiblePixels = 0;
   for (let i = 0; i < pixels; i++) {
     const o = i * 4;
     if (raw[o + 3] < 128) continue;
+    visiblePixels += 1;
     const r = Math.floor(raw[o] / step) * step;
     const g = Math.floor(raw[o + 1] / step) * step;
     const b = Math.floor(raw[o + 2] / step) * step;
@@ -112,7 +119,7 @@ export function quantizeColors(raw: Uint8Array, topN = 8, bins = 32): Array<{ he
     .map(([key, count]) => {
       const [r, g, b] = key.split(",").map(Number);
       const hex = "#" + [r, g, b].map((v) => v.toString(16).padStart(2, "0")).join("");
-      return { hex, count, share: pixels === 0 ? 0 : count / pixels };
+      return { hex, count, share: visiblePixels === 0 ? 0 : count / visiblePixels };
     });
 }
 
@@ -177,6 +184,57 @@ export function longOcrWindows(height: number, chunkHeight: number, overlap: num
     if (bottom >= height) break;
   }
   return windows;
+}
+
+function normalizedOcrLine(line: string): string {
+  return line.trim().replace(/\s+/g, " ");
+}
+
+/**
+ * 合并重叠 OCR 分片。先删除相邻分片边界处的重复行，再删除无换行文本的精确字符重叠。
+ * 不做模糊删除，避免把本来重复的日志、表格或对话内容误删。
+ */
+export function mergeOcrChunks(chunks: string[]): string {
+  let merged = "";
+  for (const raw of chunks) {
+    const next = raw.trim();
+    if (next === "") continue;
+    if (merged === "") {
+      merged = next;
+      continue;
+    }
+
+    const previousLines = merged.split(/\r?\n/);
+    const nextLines = next.split(/\r?\n/);
+    let overlappingLines = 0;
+    const maxLines = Math.min(previousLines.length, nextLines.length, 80);
+    for (let count = maxLines; count > 0; count--) {
+      const suffix = previousLines.slice(-count).map(normalizedOcrLine);
+      const prefix = nextLines.slice(0, count).map(normalizedOcrLine);
+      if (suffix.every((line, index) => line !== "" && line === prefix[index])) {
+        overlappingLines = count;
+        break;
+      }
+    }
+    if (overlappingLines > 0) {
+      const remainder = nextLines.slice(overlappingLines).join("\n").trim();
+      if (remainder !== "") merged += `\n\n${remainder}`;
+      continue;
+    }
+
+    // OCR 有时把整个分片输出为单行，此时仅去掉长度 >= 12 的精确边界重叠。
+    let overlappingChars = 0;
+    const maxChars = Math.min(merged.length, next.length, 4_000);
+    for (let count = maxChars; count >= 12; count--) {
+      if (merged.slice(-count) === next.slice(0, count)) {
+        overlappingChars = count;
+        break;
+      }
+    }
+    const remainder = next.slice(overlappingChars).trim();
+    if (remainder !== "") merged += `\n\n${remainder}`;
+  }
+  return merged;
 }
 
 /** detect 结果归一化:框夹紧到图内,输出编号清单(dsh normalizeDetectResult 同款)。 */

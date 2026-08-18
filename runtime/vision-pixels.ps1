@@ -19,6 +19,14 @@ function Assert-Args($cond, [string]$msg) { if (-not $cond) { throw $msg } }
 
 try {
   switch ($Command) {
+    # 只读取尺寸,不导出整张 RGBA;供裁剪/缩放前规划使用
+    'probe' {
+      Assert-Args ($In -and $Meta) 'probe needs -In -Meta'
+      $bmp = [System.Drawing.Bitmap]::FromFile($In)
+      try {
+        @{ width = $bmp.Width; height = $bmp.Height } | ConvertTo-Json -Compress | Set-Content -Path $Meta -Encoding ascii
+      } finally { $bmp.Dispose() }
+    }
     # 解码:任意 GDI+ 支持格式 -> RGBA raw bin + meta json(width/height)
     'decode' {
       Assert-Args ($In -and $Bin -and $Meta) 'decode needs -In -Bin -Meta'

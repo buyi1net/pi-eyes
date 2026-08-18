@@ -1,6 +1,6 @@
 {
   "name": "pi-eyes",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "description": "Give text-only models in pi the ability to see images (12 vision tools ported from dsh-vision-router ideas)",
   "type": "module",
   "pi": {
@@ -20,5 +20,8 @@
   ],
   "peerDependencies": {
     "@earendil-works/pi-ai": "*"
+  },
+  "overrides": {
+    "phin": "3.7.1"
   }
 }

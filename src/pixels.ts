@@ -3,13 +3,14 @@
 // 注意:System.Drawing 的 Format32bppArgb 内存序是 BGRA,进出都做通道交换。
 
 import { execFile } from "node:child_process";
-import { mkdtemp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
+import { mkdtemp, mkdir, open, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { sniffMediaType, type ImagePart } from "./backends";
 
-const SCRIPT_PATH = join(import.meta.dirname, "..", "runtime", "vision-pixels.ps1");
+const SCRIPT_PATH = join(dirname(fileURLToPath(import.meta.url)), "..", "runtime", "vision-pixels.ps1");
 
 export interface RawImage {
   data: Uint8Array; // RGBA
@@ -17,12 +18,17 @@ export interface RawImage {
   height: number;
 }
 
-function psRun(args: string[], timeoutMs = 60_000): Promise<void> {
+export interface ImageDimensions {
+  width: number;
+  height: number;
+}
+
+function psRun(args: string[], timeoutMs = 60_000, signal?: AbortSignal): Promise<void> {
   return new Promise((resolvePromise, reject) => {
     execFile(
       "powershell.exe",
       ["-NoProfile", "-ExecutionPolicy", "Bypass", "-File", SCRIPT_PATH, ...args],
-      { timeout: timeoutMs, windowsHide: true },
+      { timeout: timeoutMs, windowsHide: true, signal },
       (error, _stdout, stderr) => {
         if (error) {
           reject(new Error(`pixels pipeline failed: ${String(stderr).trim() || error.message}`));
@@ -35,16 +41,24 @@ function psRun(args: string[], timeoutMs = 60_000): Promise<void> {
 }
 
 /** webp(及 GDI+ 读不了的格式)先转 png。返回可被 GDI+ 读取的路径。 */
-async function ensureGdiReadable(path: string): Promise<string> {
-  const bytes = new Uint8Array(await readFile(path));
+async function ensureGdiReadable(path: string, signal?: AbortSignal): Promise<string> {
+  const handle = await open(path, "r");
+  const header = Buffer.alloc(32);
+  let bytesRead = 0;
+  try {
+    ({ bytesRead } = await handle.read(header, 0, header.length, 0));
+  } finally {
+    await handle.close();
+  }
+  const bytes = new Uint8Array(header.buffer, header.byteOffset, bytesRead);
   const type = sniffMediaType(bytes);
   if (type === undefined) {
     throw new Error(`${path} is not a recognized image (png/jpeg/webp/gif)`);
   }
   if (type !== "image/webp") return path;
-  const out = join(tmpdir(), `pi-vision-${randomUUID().slice(0, 8)}.png`);
+  const out = await scratchPath(`webp-${randomUUID().slice(0, 8)}.png`);
   await new Promise<void>((resolvePromise, reject) => {
-    execFile("magick", [path, out], { timeout: 30_000, windowsHide: true }, (error) => {
+    execFile("magick", [path, out], { timeout: 30_000, windowsHide: true, signal }, (error) => {
       if (error) reject(new Error(`webp conversion needs ImageMagick (magick) which failed: ${error.message}`));
       else resolvePromise();
     });
@@ -62,11 +76,17 @@ function bgraToRgba(bytes: Uint8Array): Uint8Array {
   return bytes;
 }
 
-let scratchDir: string | undefined;
+let scratchDirPromise: Promise<string> | undefined;
 
 async function scratch(): Promise<string> {
-  if (!scratchDir) scratchDir = await mkdtemp(join(tmpdir(), "pi-vision-"));
-  return scratchDir;
+  if (!scratchDirPromise) {
+    scratchDirPromise = mkdtemp(join(tmpdir(), "pi-vision-"))
+      .catch((error) => {
+        scratchDirPromise = undefined;
+        throw error;
+      });
+  }
+  return scratchDirPromise;
 }
 
 /** 一次性中间文件的落点(agent_end 统一清理)。 */
@@ -76,27 +96,40 @@ export async function scratchPath(name: string): Promise<string> {
 
 /** 释放本轮临时目录(bin/meta 中间物),工件不受影响。 */
 export async function cleanupScratch(): Promise<void> {
-  if (scratchDir) {
-    await rm(scratchDir, { recursive: true, force: true }).catch(() => {});
-    scratchDir = undefined;
+  const pending = scratchDirPromise;
+  scratchDirPromise = undefined;
+  if (!pending) return;
+  const dir = await pending.catch(() => undefined);
+  if (dir) await rm(dir, { recursive: true, force: true }).catch(() => {});
+}
+
+/** 只探测图片尺寸,不把整张 RGBA 导出到 Node。 */
+export async function probeImage(path: string, signal?: AbortSignal): Promise<ImageDimensions> {
+  const readable = await ensureGdiReadable(path, signal);
+  const metaFile = await scratchPath(`probe-${randomUUID().slice(0, 8)}.json`);
+  await psRun(["probe", "-In", readable, "-Meta", metaFile], 30_000, signal);
+  const meta = JSON.parse(await readFile(metaFile, { encoding: "utf8", signal })) as ImageDimensions;
+  if (!Number.isInteger(meta.width) || !Number.isInteger(meta.height) || meta.width <= 0 || meta.height <= 0) {
+    throw new Error(`could not read image dimensions for ${path}`);
   }
+  return meta;
 }
 
 /**
  * 解码图片为 RGBA。fitW/fitH 提供时先缩放到该尺寸(JS 层负责算等比目标),
  * 供 colors 降采样 / pixel_diff 对齐 / trace 限像素。
  */
-export async function decodeImage(path: string, fit?: { width: number; height: number }): Promise<RawImage> {
-  const readable = await ensureGdiReadable(path);
+export async function decodeImage(path: string, fit?: { width: number; height: number }, signal?: AbortSignal): Promise<RawImage> {
+  const readable = await ensureGdiReadable(path, signal);
   const dir = await scratch();
   const id = randomUUID().slice(0, 8);
   const bin = join(dir, `${id}.bin`);
   const metaFile = join(dir, `${id}.json`);
   const args = ["decode", "-In", readable, "-Bin", bin, "-Meta", metaFile];
   if (fit) args.push("-W", String(fit.width), "-H", String(fit.height));
-  await psRun(args);
-  const meta = JSON.parse(await readFile(metaFile, "utf8")) as { width: number; height: number };
-  const data = bgraToRgba(new Uint8Array(await readFile(bin)));
+  await psRun(args, 60_000, signal);
+  const meta = JSON.parse(await readFile(metaFile, { encoding: "utf8", signal })) as { width: number; height: number };
+  const data = bgraToRgba(new Uint8Array(await readFile(bin, { signal })));
   if (data.length !== meta.width * meta.height * 4) {
     throw new Error(`decode produced ${data.length} bytes, expected ${meta.width * meta.height * 4}`);
   }
@@ -104,23 +137,23 @@ export async function decodeImage(path: string, fit?: { width: number; height: n
 }
 
 /** RGBA 编码为 PNG。 */
-export async function encodePng(raw: Uint8Array, width: number, height: number, outPath: string): Promise<void> {
+export async function encodePng(raw: Uint8Array, width: number, height: number, outPath: string, signal?: AbortSignal): Promise<void> {
   const dir = await scratch();
   const bin = join(dir, `${randomUUID().slice(0, 8)}.bin`);
-  await writeFile(bin, bgraToRgba(new Uint8Array(raw)));
-  await psRun(["encode", "-Bin", bin, "-Out", outPath, "-W", String(width), "-H", String(height)]);
+  await writeFile(bin, bgraToRgba(new Uint8Array(raw)), { signal });
+  await psRun(["encode", "-Bin", bin, "-Out", outPath, "-W", String(width), "-H", String(height)], 60_000, signal);
 }
 
 /** 裁剪存 PNG。 */
-export async function cropToPng(path: string, box: { x1: number; y1: number; x2: number; y2: number }, outPath: string): Promise<void> {
-  const readable = await ensureGdiReadable(path);
-  await psRun(["crop", "-In", readable, "-Out", outPath, "-X1", String(box.x1), "-Y1", String(box.y1), "-X2", String(box.x2), "-Y2", String(box.y2)]);
+export async function cropToPng(path: string, box: { x1: number; y1: number; x2: number; y2: number }, outPath: string, signal?: AbortSignal): Promise<void> {
+  const readable = await ensureGdiReadable(path, signal);
+  await psRun(["crop", "-In", readable, "-Out", outPath, "-X1", String(box.x1), "-Y1", String(box.y1), "-X2", String(box.x2), "-Y2", String(box.y2)], 60_000, signal);
 }
 
 /** 裁剪存白底 JPEG(视觉 OCR 分片:部分后端对带 alpha 的 PNG 会退化)。 */
-export async function cropToJpeg(path: string, box: { x1: number; y1: number; x2: number; y2: number }, outPath: string): Promise<void> {
-  const readable = await ensureGdiReadable(path);
-  await psRun(["crop-jpeg", "-In", readable, "-Out", outPath, "-X1", String(box.x1), "-Y1", String(box.y1), "-X2", String(box.x2), "-Y2", String(box.y2)]);
+export async function cropToJpeg(path: string, box: { x1: number; y1: number; x2: number; y2: number }, outPath: string, signal?: AbortSignal): Promise<void> {
+  const readable = await ensureGdiReadable(path, signal);
+  await psRun(["crop-jpeg", "-In", readable, "-Out", outPath, "-X1", String(box.x1), "-Y1", String(box.y1), "-X2", String(box.x2), "-Y2", String(box.y2)], 60_000, signal);
 }
 
 /** 画标注框(带 label 字段时画编号圆)存 PNG。 */
@@ -128,23 +161,14 @@ export async function annotateBoxes(
   path: string,
   boxes: Array<{ x1: number; y1: number; x2: number; y2: number; label?: string }>,
   outPath: string,
+  signal?: AbortSignal,
 ): Promise<void> {
-  const readable = await ensureGdiReadable(path);
+  const readable = await ensureGdiReadable(path, signal);
   const dir = await scratch();
   // JSON 含双引号,走文件传递,避免 PowerShell -File 参数的引号歧义
   const boxesFile = join(dir, `${randomUUID().slice(0, 8)}.json`);
   await writeFile(boxesFile, JSON.stringify(boxes), "utf8");
-  await psRun(["annotate", "-In", readable, "-Out", outPath, "-Boxes", boxesFile]);
-}
-
-/** 系统默认看图器打开(vision_present)。 */
-export async function openWithSystemViewer(path: string): Promise<void> {
-  await new Promise<void>((resolvePromise, reject) => {
-    execFile("cmd.exe", ["/c", "start", "", path], { windowsHide: true, timeout: 10_000 }, (error) => {
-      if (error) reject(new Error(`failed to open image viewer: ${error.message}`));
-      else resolvePromise();
-    });
-  });
+  await psRun(["annotate", "-In", readable, "-Out", outPath, "-Boxes", boxesFile], 60_000, signal);
 }
 
 // ---------- 工件目录(dsh 同概念:cwd/.pi-vision/artifacts) ----------
@@ -178,12 +202,17 @@ export async function artifactPath(cwd: string, name: string): Promise<string> {
 }
 
 /** 读图片文件为视觉后端的 base64 part(读不了/格式不对直接抛错)。 */
-export async function imagePartFromPath(path: string, maxBytes: number): Promise<ImagePart & { path: string }> {
-  const bytes = new Uint8Array(await readFile(path));
+export async function imagePartFromPath(
+  path: string,
+  options: { signal?: AbortSignal; maxBytes?: number } = {},
+): Promise<ImagePart & { path: string }> {
+  const file = await stat(path);
+  if (!file.isFile()) throw new Error(`${path} is not a file`);
+  if (options.maxBytes !== undefined && file.size > options.maxBytes) {
+    throw new Error(`${path} is larger than ${Math.round(options.maxBytes / 1024 / 1024)}MB; provide a smaller image`);
+  }
+  const bytes = new Uint8Array(await readFile(path, { signal: options.signal }));
   const mediaType = sniffMediaType(bytes);
   if (!mediaType) throw new Error(`${path} is not a recognized image (png/jpeg/webp/gif)`);
-  if (bytes.length > maxBytes) {
-    throw new Error(`${path} is larger than ${Math.round(maxBytes / 1024 / 1024)}MB; provide a smaller image`);
-  }
   return { path, data: Buffer.from(bytes).toString("base64"), mediaType };
 }
